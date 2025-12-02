@@ -251,15 +251,15 @@ install_optional() {
         return
     fi
     
-    print_header "Installing Optional Packages"
+    # print_header "Installing Optional Packages"
     
-    # Jupyter for notebooks
-    read -p "Install Jupyter notebook? (y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        pip install jupyter notebook ipywidgets
-        print_success "Jupyter installed"
-    fi
+    # # Jupyter for notebooks
+    # read -p "Install Jupyter notebook? (y/n) " -n 1 -r
+    # echo
+    # if [[ $REPLY =~ ^[Yy]$ ]]; then
+    #     pip install jupyter notebook ipywidgets
+    #     print_success "Jupyter installed"
+    # fi
     
     # Better JSON handling
     pip install orjson
