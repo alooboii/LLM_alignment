@@ -66,16 +66,16 @@ class ExperimentOrchestrator:
         }
         
         # Paths
-        # self.project_root = Path.cwd()
-        # self.data_dir = self.project_root / "data"
-        # self.models_dir = self.project_root / "models"
-        # self.checkpoints_dir = self.project_root / "checkpoints"
-        # self.eval_dir = self.project_root / "eval"
-        self.project_root = "/kaggle/working/LLM_Alignment/"
+        self.project_root = Path.cwd()
         self.data_dir = self.project_root / "data"
         self.models_dir = self.project_root / "models"
         self.checkpoints_dir = self.project_root / "checkpoints"
         self.eval_dir = self.project_root / "eval"
+        # self.project_root = "/kaggle/working/LLM_Alignment/"
+        # self.data_dir = self.project_root / "data"
+        # self.models_dir = self.project_root / "models"
+        # self.checkpoints_dir = self.project_root / "checkpoints"
+        # self.eval_dir = self.project_root / "eval"
         
         # Experiment configuration
         self.seeds = args.seeds if args.seeds else [42, 123, 456]
@@ -140,7 +140,7 @@ class ExperimentOrchestrator:
         logger.info("="*80)
         
         cmd = [
-            "python", "prepare_data.py",
+            "python", "/kaggle/working/LLM_Alignment/scripts/prepare_data.py",
             "--seed", str(self.seeds[0]),
         ]
         
@@ -159,7 +159,7 @@ class ExperimentOrchestrator:
         save_dir = self.models_dir / "reward_model"
         
         cmd = [
-            "python", "train_reward_model.py",
+            "python", "/kaggle/working/LLM_Alignment/scripts/train_reward_model.py",
             "--batch_size", str(self.batch_size * 2),  # Larger batch for reward model
             "--lr", "5e-5",
             "--epochs", str(self.epochs),
@@ -193,7 +193,7 @@ class ExperimentOrchestrator:
             for seed in self.seeds:
                 save_dir = self.checkpoints_dir / f"dpo_seed_{seed}"
                 cmd = [
-                    "python", "train_dpo.py",
+                    "python", "/kaggle/working/LLM_Alignment/scripts/train_dpo.py",
                     "--method", "DPO",
                     "--batch_size", str(self.batch_size),
                     "--lr", "1e-4",
@@ -213,7 +213,7 @@ class ExperimentOrchestrator:
             for seed in self.seeds:
                 save_dir = self.checkpoints_dir / f"ppo_sparse_seed_{seed}"
                 cmd = [
-                    "python", "train_ppo.py",
+                    "python", "/kaggle/working/LLM_Alignment/scripts/train_ppo.py",
                     "--method", "PPO",
                     "--reward_model_path", reward_model_path,
                     "--reward_mode", "sparse",
@@ -234,7 +234,7 @@ class ExperimentOrchestrator:
             seed = self.seeds[0]
             save_dir = self.checkpoints_dir / f"ppo_dense_seed_{seed}"
             cmd = [
-                "python", "train_ppo.py",
+                "python", "/kaggle/working/LLM_Alignment/scripts/train_ppo.py",
                 "--method", "PPO",
                 "--reward_model_path", reward_model_path,
                 "--reward_mode", "dense",
@@ -255,7 +255,7 @@ class ExperimentOrchestrator:
             for seed in self.seeds:
                 save_dir = self.checkpoints_dir / f"grpo_seed_{seed}"
                 cmd = [
-                    "python", "train_grpo.py",
+                    "python", "/kaggle/working/LLM_Alignment/scripts/train_grpo.py",
                     "--method", "GRPO",
                     "--reward_model_path", reward_model_path,
                     "--group_size", "8",
@@ -299,7 +299,7 @@ class ExperimentOrchestrator:
             for lr in ["1e-4", "5e-5", "1e-5"]:
                 save_dir = self.checkpoints_dir / "ablations" / f"dpo_lr_{lr}"
                 cmd = [
-                    "python", "train_dpo.py",
+                    "python", "/kaggle/working/LLM_Alignment/scripts/train_dpo.py",
                     "--method", "DPO",
                     "--batch_size", str(self.batch_size),
                     "--lr", lr,
@@ -316,7 +316,7 @@ class ExperimentOrchestrator:
             for kl_coef in ["0.01", "0.05", "0.1"]:
                 save_dir = self.checkpoints_dir / "ablations" / f"ppo_kl_{kl_coef}"
                 cmd = [
-                    "python", "train_ppo.py",
+                    "python", "/kaggle/working/LLM_Alignment/scripts/train_ppo.py",
                     "--method", "PPO",
                     "--reward_model_path", reward_model_path,
                     "--reward_mode", "sparse",
@@ -335,7 +335,7 @@ class ExperimentOrchestrator:
             logger.info("\n--- PPO No-KL Ablation ---")
             save_dir = self.checkpoints_dir / "ablations" / "ppo_no_kl"
             cmd = [
-                "python", "train_ppo.py",
+                "python", "/kaggle/working/LLM_Alignment/scripts/train_ppo.py",
                 "--method", "PPO",
                 "--reward_model_path", reward_model_path,
                 "--reward_mode", "sparse",
@@ -355,7 +355,7 @@ class ExperimentOrchestrator:
             for group_size in ["4", "8", "16"]:
                 save_dir = self.checkpoints_dir / "ablations" / f"grpo_g{group_size}"
                 cmd = [
-                    "python", "train_grpo.py",
+                    "python", "/kaggle/working/LLM_Alignment/scripts/train_grpo.py",
                     "--method", "GRPO",
                     "--reward_model_path", reward_model_path,
                     "--group_size", group_size,
@@ -416,7 +416,7 @@ class ExperimentOrchestrator:
             # 1. Generate outputs
             output_file = self.eval_dir / f"{method}_seed_{seed}_outputs.jsonl"
             cmd = [
-                "python", "eval_generate.py",
+                "python", "/kaggle/working/LLM_Alignment/scripts/eval_generate.py",
                 "--model_path", str(model_path),
                 "--test_file", str(test_file),
                 "--output_file", str(output_file),
@@ -431,7 +431,7 @@ class ExperimentOrchestrator:
             # 2. Compute metrics
             metrics_file = self.eval_dir / f"{method}_seed_{seed}_metrics.csv"
             cmd = [
-                "python", "eval_metrics.py",
+                "python", "/kaggle/working/LLM_Alignment/scripts/eval_metrics.py",
                 "--generated_file", str(output_file),
                 "--output_file", str(metrics_file),
                 "--seed", str(seed),
@@ -484,7 +484,7 @@ class ExperimentOrchestrator:
             
             output_file = self.eval_dir / f"ppo_seed_{seed}_hack_tests.csv"
             cmd = [
-                "python", "perturbations.py",
+                "python", "/kaggle/working/LLM_Alignment/scripts/perturbations.py",
                 "--model_path", str(model_path),
                 "--reward_model_path", reward_model_path,
                 "--test_file", str(test_file),
