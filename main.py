@@ -121,7 +121,7 @@ class ExperimentOrchestrator:
     def stage_data_preparation(self) -> bool:
         """Stage 1: Prepare data"""
         logger.info("\n" + "="*80)
-        logger.info("STAGE 1: DATA PREPARATION")
+        logger.info("----STAGE 1: DATA PREPARATION----")
         logger.info("="*80 + "\n")
         
         cmd = [
