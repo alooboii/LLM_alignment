@@ -237,7 +237,7 @@ class PerturbationConfig:
 
 @dataclass  
 class HardwareConfig:
-    gradient_checkpointing: bool = True
+    gradient_checkpointing: bool = False
 
 @dataclass
 class LoRAConfig:
