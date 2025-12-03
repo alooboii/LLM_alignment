@@ -686,6 +686,44 @@ def load_config(load_path: str) -> Dict:
 # MAIN (for testing)
 # =============================================================================
 
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+def get_default_config():
+    """Get default configuration object"""
+    class Config:
+        def __init__(self):
+            self.paths = PathConfig()
+            self.data = DataConfig()
+            self.base_model = ModelConfig()
+            self.reward_model = RewardModelConfig()
+            self.dpo = DPOConfig()
+            self.ppo = PPOConfig()
+            self.grpo = GRPOConfig()
+            self.eval = EvalConfig()
+    
+    return Config()
+
+
+# Create default Config class for type hints
+class Config:
+    """Main configuration container"""
+    def __init__(self):
+        self.paths = PathConfig()
+        self.data = DataConfig()
+        self.base_model = ModelConfig()
+        self.reward_model = RewardModelConfig()
+        self.dpo = DPOConfig()
+        self.ppo = PPOConfig()
+        self.grpo = GRPOConfig()
+        self.eval = EvalConfig()
+
+
+# =============================================================================
+# MAIN (for testing)
+# =============================================================================
+
 if __name__ == "__main__":
     print("Testing configuration...")
     
@@ -700,17 +738,10 @@ if __name__ == "__main__":
     print("\n✓ All directories created")
     
     # Test configurations
-    data_config = DataConfig()
-    model_config = ModelConfig()
-    reward_config = RewardModelConfig()
-    dpo_config = DPOConfig()
-    ppo_config = PPOConfig()
-    grpo_config = GRPOConfig()
-    eval_config = EvalConfig()
-    
+    config = get_default_config()
     print("\n✓ All configurations loaded")
-    print(f"  Data config: {data_config.dataset_name}")
-    print(f"  Model config: {model_config.model_name}")
-    print(f"  DPO beta: {dpo_config.beta}")
-    print(f"  PPO kl_coef: {ppo_config.kl_coef}")
-    print(f"  GRPO group_size: {grpo_config.group_size}")
+    print(f"  Data config: {config.data.dataset_name}")
+    print(f"  Model config: {config.base_model.model_name}")
+    print(f"  DPO beta: {config.dpo.beta}")
+    print(f"  PPO kl_coef: {config.ppo.kl_coef}")
+    print(f"  GRPO group_size: {config.grpo.group_size}")
