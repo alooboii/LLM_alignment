@@ -756,12 +756,12 @@ def main():
     parser.add_argument('--max_length', type=int, default=512)
     
     # Quantization
-    parser.add_argument('--load_in_8bit', action='store_true', default=True)
-    parser.add_argument('--load_in_4bit', action='store_true', default=False)
+    parser.add_argument('--load_in_8bit', action='store_true', default=False)
+    parser.add_argument('--load_in_4bit', action='store_true', default=True)
     parser.add_argument('--mixed_precision', type=str, default='fp16')
     
     # LoRA
-    parser.add_argument('--use_lora', action='store_true', default=False)  # Change default to False
+    parser.add_argument('--use_lora', action='store_true', default=True) 
     parser.add_argument('--lora_r', type=int, default=8)
     parser.add_argument('--lora_alpha', type=int, default=16)
     parser.add_argument('--lora_dropout', type=float, default=0.05)
