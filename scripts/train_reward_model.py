@@ -394,7 +394,7 @@ class RewardModelTrainer:
             lr_scheduler_type=self.args.lr_scheduler_type,
             
             # Evaluation
-            evaluation_strategy="steps",
+            eval_strategy="steps",
             eval_steps=self.args.eval_steps,
             save_strategy="steps",
             save_steps=self.args.save_steps,
