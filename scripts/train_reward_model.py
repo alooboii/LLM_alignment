@@ -317,14 +317,14 @@ class RewardModelTrainer:
             device_map="auto",
             trust_remote_code=self.config.base_model.trust_remote_code,
         )
-        if hasattr(self.model, 'gradient_checkpointing_disable'):
-            self.model.gradient_checkpointing_disable()
-            logger.info("Disabled gradient checkpointing")
-        
-        # Prepare for training if using quantization
         if self.args.load_in_8bit or self.args.load_in_4bit:
             self.model = prepare_model_for_kbit_training(self.model)
             logger.info("Prepared model for quantized training")
+            
+            # NOW disable gradient checkpointing (after prepare_model_for_kbit_training)
+            if hasattr(self.model, 'gradient_checkpointing_disable'):
+                self.model.gradient_checkpointing_disable()
+                logger.info("Disabled gradient checkpointing after prepare_model_for_kbit_training")
         
         
         # Apply LoRA if specified
