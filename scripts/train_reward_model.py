@@ -748,7 +748,7 @@ def main():
     parser.add_argument('--max_grad_norm', type=float, default=1.0)
     
     # Paths
-    parser.add_argument('--save_dir', type=str, default=None)
+    parser.add_argument('--save_dir', type=str, default="models/reward_model")
     parser.add_argument('--data_dir', type=str, default='data/processed')
     
     # Model
