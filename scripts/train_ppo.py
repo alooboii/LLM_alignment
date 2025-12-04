@@ -409,17 +409,18 @@ class PPOModelTrainer:
         
         # Setup PPO config
         ppo_config = PPOConfig(
-            # Model settings
-            model_name=self.args.model_name,
             
             # Training hyperparameters
             learning_rate=self.args.learning_rate,
             batch_size=self.args.batch_size,
             mini_batch_size=self.args.mini_batch_size,
             gradient_accumulation_steps=self.args.gradient_accumulation_steps,
-            
-            # PPO-specific
-            ppo_epochs=self.args.ppo_epochs,
+            optimize_cuda_cache=True,
+            early_stopping=False,
+            ppo_epochs=self.config.ppo.ppo_epochs,
+            max_grad_norm=1.0,
+            seed=self.args.seed,
+            log_with=None,
             
             # KL penalty
             init_kl_coef=self.args.kl_coef,
@@ -433,8 +434,6 @@ class PPOModelTrainer:
             cliprange=self.args.clip_range,
             cliprange_value=self.args.clip_range_vf if self.args.clip_range_vf else self.args.clip_range,
             
-            # Logging
-            log_with="tensorboard",
             project_kwargs={"logging_dir": str(self.logs_dir)},
             
             # Seed
