@@ -774,6 +774,8 @@ def main():
     parser.add_argument('--save_total_limit', type=int, default=2)
     parser.add_argument('--logging_steps', type=int, default=10)
     parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--max_steps', type=int, default=-1)  # Add this
+    
     
     args = parser.parse_args()
     
