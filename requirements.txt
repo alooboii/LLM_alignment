@@ -1,12 +1,11 @@
-# Requirements for Alignment Methods Assignment
+# Requirements for Alignment Methods Assignment - Kaggle Optimized
 # Python 3.8+ required
 
 # ============================================================================
-# Core Deep Learning Frameworks
+# Core Deep Learning Frameworks (Kaggle pre-installed, but pinning versions)
 # ============================================================================
 torch>=2.0.0
-torchvision>=0.15.0
-torchaudio>=2.0.0
+# torchvision and torchaudio not needed for this project
 
 # ============================================================================
 # Transformers & LLM Libraries
@@ -17,64 +16,50 @@ tokenizers>=0.15.0
 accelerate>=0.25.0
 peft>=0.7.0
 trl>=0.7.10
-bitsandbytes>=0.41.0
+bitsandbytes>=0.41.0  # For 4-bit/8-bit quantization
 
 # ============================================================================
-# Scientific Computing
+# Scientific Computing (Most pre-installed on Kaggle)
 # ============================================================================
 numpy>=1.24.0
 scipy>=1.10.0
 pandas>=2.0.0
 
 # ============================================================================
-# Visualization
+# Visualization (Pre-installed on Kaggle)
 # ============================================================================
 matplotlib>=3.7.0
 seaborn>=0.12.0
-plotly>=5.14.0
 
 # ============================================================================
-# Machine Learning & Metrics
+# Machine Learning & Metrics (Pre-installed on Kaggle)
 # ============================================================================
 scikit-learn>=1.3.0
-tensorboard>=2.14.0
 
 # ============================================================================
 # Utilities
 # ============================================================================
 tqdm>=4.65.0
-requests>=2.31.0
-aiohttp>=3.8.0
+# requests and aiohttp pre-installed on Kaggle
 
 # ============================================================================
-# Data Processing
+# Data Processing (Pre-installed on Kaggle)
 # ============================================================================
 pyarrow>=12.0.0
 huggingface-hub>=0.19.0
 
 # ============================================================================
-# Optional but Recommended
+# KAGGLE-SPECIFIC NOTES
 # ============================================================================
-# For better performance
-ninja>=1.11.0
-flash-attn>=2.3.0  # Optional: Requires specific CUDA setup
-
-# For Jupyter notebooks (if you want to use notebooks)
-jupyter>=1.0.0
-notebook>=7.0.0
-ipywidgets>=8.0.0
-
-# For better JSON handling
-orjson>=3.9.0
-
-# For configuration management
-omegaconf>=2.3.0
-hydra-core>=1.3.0
-
-# ============================================================================
-# Development Tools (Optional)
-# ============================================================================
-pytest>=7.4.0
-black>=23.7.0
-flake8>=6.1.0
-mypy>=1.5.0
+# The following are already installed on Kaggle and don't need pip install:
+# - numpy, pandas, scipy, scikit-learn
+# - matplotlib, seaborn
+# - torch (with CUDA)
+# - jupyter, ipywidgets
+# - requests, tqdm
+#
+# For Kaggle, you only need to install:
+# !pip install transformers datasets accelerate peft trl bitsandbytes
+#
+# Or for minimal install:
+# !pip install -q transformers datasets accelerate peft trl bitsandbytes --upgrade

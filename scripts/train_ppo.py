@@ -88,8 +88,19 @@ from trl import (
 
 # Import config
 from config.default_config import get_default_config
-from checkpoint_cleanup import cleanup_old_checkpoints
-from training_callbacks import CustomPPOCallback
+
+# Import helper modules with error handling
+try:
+    from scripts.checkpoint_cleanup import cleanup_old_checkpoints
+except ImportError:
+    def cleanup_old_checkpoints(checkpoint_dir, keep_n=2):
+        """Fallback function if cleanup module not found"""
+        import shutil
+        from pathlib import Path
+        checkpoints = sorted(Path(checkpoint_dir).glob('checkpoint_*'), key=lambda x: x.stat().st_mtime, reverse=True)
+        for ckpt in checkpoints[keep_n:]:
+            if ckpt.is_dir():
+                shutil.rmtree(ckpt)
 
 # Setup logging
 logging.basicConfig(
@@ -433,11 +444,8 @@ class PPOModelTrainer:
             # Clipping
             cliprange=self.args.clip_range,
             cliprange_value=self.args.clip_range_vf if self.args.clip_range_vf else self.args.clip_range,
-            
+
             project_kwargs={"logging_dir": str(self.logs_dir)},
-            
-            # Seed
-            seed=self.args.seed,
         )
         
         # Create PPO trainer

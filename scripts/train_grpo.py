@@ -61,13 +61,12 @@ from peft import (
     PeftModel
 )
 
+# Add project root to path for Kaggle
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
 # Import config
-from default_config import (
-    parse_grpo_args,
-    get_config_from_args,
-    save_args_to_json,
-    Config
-)
+from config.default_config import get_default_config
 
 # Setup logging
 logging.basicConfig(
@@ -80,7 +79,7 @@ logger = logging.getLogger(__name__)
 class GRPOModelTrainer:
     """Main trainer class for GRPO alignment"""
     
-    def __init__(self, args, config: Config):
+    def __init__(self, args, config):
         self.args = args
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -127,12 +126,18 @@ class GRPOModelTrainer:
         """Save arguments and config"""
         # Save args
         args_path = self.save_dir / "args.json"
-        save_args_to_json(self.args, str(args_path))
+        with open(args_path, 'w') as f:
+            json.dump(vars(self.args), f, indent=2)
         logger.info(f"Saved args to {args_path}")
-        
+
         # Save config
         config_path = self.save_dir / "config.json"
-        self.config.save(str(config_path))
+        config_dict = {
+            'data': vars(self.config.data) if hasattr(self.config.data, '__dict__') else {},
+            'base_model': vars(self.config.base_model) if hasattr(self.config.base_model, '__dict__') else {},
+        }
+        with open(config_path, 'w') as f:
+            json.dump(config_dict, f, indent=2, default=str)
         logger.info(f"Saved config to {config_path}")
     
     def setup_tokenizer(self):
@@ -1029,15 +1034,63 @@ class GRPOModelTrainer:
 
 def main():
     """Main entry point"""
-    # Parse arguments
-    args = parse_grpo_args()
-    
+    import argparse
+
+    parser = argparse.ArgumentParser(description='GRPO Training')
+
+    # Basic args
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=4)
+    parser.add_argument('--learning_rate', type=float, default=1e-5)
+
+    # GRPO specific
+    parser.add_argument('--group_size', type=int, default=8)
+    parser.add_argument('--advantage_normalization', type=str, default='rank', choices=['rank', 'zscore', 'minmax'])
+    parser.add_argument('--kl_coef', type=float, default=0.05)
+    parser.add_argument('--target_kl', type=float, default=0.1)
+    parser.add_argument('--clip_range', type=float, default=0.2)
+
+    # Paths
+    parser.add_argument('--save_dir', type=str, default=None)
+    parser.add_argument('--output_dir', type=str, default='checkpoints')
+    parser.add_argument('--data_dir', type=str, default='data/processed')
+    parser.add_argument('--reward_model_path', type=str, required=True)
+
+    # Model
+    parser.add_argument('--model_name', type=str, default='HuggingFaceTB/SmolLM2-135M-Instruct')
+    parser.add_argument('--max_length', type=int, default=512)
+    parser.add_argument('--max_new_tokens', type=int, default=256)
+
+    # Generation
+    parser.add_argument('--temperature', type=float, default=0.7)
+    parser.add_argument('--top_k', type=int, default=50)
+    parser.add_argument('--top_p', type=float, default=0.95)
+    parser.add_argument('--do_sample', action='store_true', default=True)
+
+    # Quantization
+    parser.add_argument('--load_in_8bit', action='store_true', default=True)
+    parser.add_argument('--load_in_4bit', action='store_true', default=False)
+    parser.add_argument('--mixed_precision', type=str, default='fp16')
+
+    # LoRA
+    parser.add_argument('--use_lora', action='store_true', default=True)
+    parser.add_argument('--lora_r', type=int, default=8)
+    parser.add_argument('--lora_alpha', type=int, default=16)
+    parser.add_argument('--lora_dropout', type=float, default=0.05)
+
+    # Logging
+    parser.add_argument('--logging_steps', type=int, default=10)
+
+    args = parser.parse_args()
+
     # Get config
-    config = get_config_from_args(args)
-    
+    config = get_default_config()
+
     # Create trainer
     trainer = GRPOModelTrainer(args, config)
-    
+
     # Run training
     trainer.run()
 
