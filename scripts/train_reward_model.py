@@ -447,7 +447,18 @@ class RewardModelTrainer:
         train_result = trainer.train()
         
         # Save final model
-        trainer.save_model(str(self.save_dir / "final_model"))
+        final_model_path = self.save_dir / "final_model"
+        final_model_path.mkdir(parents=True, exist_ok=True)
+        
+        if self.args.use_lora:
+            # Save ONLY the LoRA adapter (not the full quantized model)
+            self.model.save_pretrained(str(final_model_path))
+        else:
+            # For non-LoRA models, use trainer.save_model
+            trainer.save_model(str(final_model_path))
+        
+        # Save tokenizer
+        self.tokenizer.save_pretrained(str(final_model_path))
         
         # Save training metrics
         metrics = train_result.metrics
