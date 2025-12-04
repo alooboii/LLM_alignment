@@ -78,7 +78,7 @@ class ExperimentOrchestrator:
             # Full pipeline - optimized settings
             self.max_steps = -1  # Full training
             self.eval_steps = 200
-            self.save_steps = 500
+            self.save_steps = 400
     
     def run_command(self, cmd: List[str], stage_name: str, experiment_name: str = None) -> bool:
         """Run a command and handle errors with real-time output streaming"""
