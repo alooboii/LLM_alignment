@@ -56,13 +56,13 @@ from peft import (
 # TRL for DPO
 from trl import DPOTrainer, DPOConfig
 
-# Add project root to path for Kaggle
-PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
 # Import config
-from config.default_config import get_default_config
-
+from config.default_config import (
+    parse_dpo_args,
+    get_config_from_args,
+    save_args_to_json,
+    Config
+)
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -73,8 +73,8 @@ logger = logging.getLogger(__name__)
 
 class DPOModelTrainer:
     """Main trainer class for DPO alignment"""
-
-    def __init__(self, args, config):
+    
+    def __init__(self, args, config: Config):
         self.args = args
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -118,18 +118,12 @@ class DPOModelTrainer:
         """Save arguments and config"""
         # Save args
         args_path = self.save_dir / "args.json"
-        with open(args_path, 'w') as f:
-            json.dump(vars(self.args), f, indent=2)
+        save_args_to_json(self.args, str(args_path))
         logger.info(f"Saved args to {args_path}")
-
+        
         # Save config
         config_path = self.save_dir / "config.json"
-        config_dict = {
-            'data': vars(self.config.data) if hasattr(self.config.data, '__dict__') else {},
-            'base_model': vars(self.config.base_model) if hasattr(self.config.base_model, '__dict__') else {},
-        }
-        with open(config_path, 'w') as f:
-            json.dump(config_dict, f, indent=2, default=str)
+        self.config.save(str(config_path))
         logger.info(f"Saved config to {config_path}")
     
     def setup_tokenizer(self):
@@ -250,6 +244,8 @@ class DPOModelTrainer:
                 device_map="auto",
                 trust_remote_code=self.config.base_model.trust_remote_code,
             )
+            
+            # CRITICAL FIX: Disable gradient checkpointing for quantized reference model
             if self.args.load_in_8bit or self.args.load_in_4bit:
                 if hasattr(self.ref_model, 'gradient_checkpointing_disable'):
                     self.ref_model.gradient_checkpointing_disable()
@@ -478,6 +474,8 @@ class DPOModelTrainer:
                 device_map="auto",
                 trust_remote_code=self.config.base_model.trust_remote_code,
             )
+            
+            # CRITICAL FIX: Disable gradient checkpointing for quantized reference model
             if hasattr(self.ref_model, 'gradient_checkpointing_disable'):
                 self.ref_model.gradient_checkpointing_disable()
                 logger.info("✓ Disabled gradient checkpointing for reference model")
@@ -504,11 +502,14 @@ class DPOModelTrainer:
                     return_tensors='pt',
                     truncation=True,
                     max_length=self.args.max_length
-                ).to(self.model.device)
+                )
                 
-                # Get logits from both models
-                policy_outputs = self.model(**inputs)
-                ref_outputs = self.ref_model(**inputs)
+                # Get logits from both models (move inputs to each model's device)
+                policy_inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+                policy_outputs = self.model(**policy_inputs)
+                
+                ref_inputs = {k: v.to(self.ref_model.device) for k, v in inputs.items()}
+                ref_outputs = self.ref_model(**ref_inputs)
                 
                 policy_logits = policy_outputs.logits
                 ref_logits = ref_outputs.logits
@@ -517,8 +518,11 @@ class DPOModelTrainer:
                 policy_log_probs = torch.log_softmax(policy_logits, dim=-1)
                 ref_log_probs = torch.log_softmax(ref_logits, dim=-1)
                 
+                # Move ref_logits to same device as policy_logits for comparison
+                ref_log_probs = ref_log_probs.to(policy_log_probs.device)
+                
                 # Get actual token log probs
-                token_ids = inputs['input_ids'][:, 1:]  # Shift for next-token prediction
+                token_ids = policy_inputs['input_ids'][:, 1:]  # Shift for next-token prediction
                 
                 # Gather log probs for actual tokens
                 policy_token_log_probs = torch.gather(
@@ -783,63 +787,15 @@ class DPOModelTrainer:
 
 def main():
     """Main entry point"""
-    import argparse
-
-    parser = argparse.ArgumentParser(description='DPO Training')
-
-    # Basic args
-    parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--epochs', type=int, default=3)
-    parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=2)
-    parser.add_argument('--learning_rate', type=float, default=1e-4)
-    parser.add_argument('--weight_decay', type=float, default=0.01)
-    parser.add_argument('--warmup_steps', type=int, default=100)
-    parser.add_argument('--max_grad_norm', type=float, default=1.0)
-
-    # DPO specific
-    parser.add_argument('--beta', type=float, default=0.1)
-    parser.add_argument('--loss_type', type=str, default='sigmoid')
-    parser.add_argument('--label_smoothing', type=float, default=0.0)
-
-    # Paths
-    parser.add_argument('--save_dir', type=str, default=None)
-    parser.add_argument('--output_dir', type=str, default='checkpoints')
-    parser.add_argument('--data_dir', type=str, default='data/processed')
-    parser.add_argument('--reference_model', type=str, default=None)
-
-    # Model
-    parser.add_argument('--model_name', type=str, default='HuggingFaceTB/SmolLM2-135M-Instruct')
-    parser.add_argument('--max_length', type=int, default=512)
-
-    # Quantization
-    parser.add_argument('--load_in_8bit', action='store_true', default=False)
-    parser.add_argument('--load_in_4bit', action='store_true', default=True)
-    parser.add_argument('--mixed_precision', type=str, default='fp16')
-
-    # LoRA
-    parser.add_argument('--use_lora', action='store_true', default=True)
-    parser.add_argument('--lora_r', type=int, default=8)
-    parser.add_argument('--lora_alpha', type=int, default=16)
-    parser.add_argument('--lora_dropout', type=float, default=0.05)
-
-    # Training settings
-    parser.add_argument('--optimizer', type=str, default='adamw_torch')
-    parser.add_argument('--lr_scheduler_type', type=str, default='linear')
-    parser.add_argument('--eval_steps', type=int, default=100)
-    parser.add_argument('--save_steps', type=int, default=500)
-    parser.add_argument('--save_total_limit', type=int, default=2)
-    parser.add_argument('--logging_steps', type=int, default=10)
-    parser.add_argument('--num_workers', type=int, default=0)
-
-    args = parser.parse_args()
-
+    # Parse arguments
+    args = parse_dpo_args()
+    
     # Get config
-    config = get_default_config()
-
+    config = get_config_from_args(args)
+    
     # Create trainer
     trainer = DPOModelTrainer(args, config)
-
+    
     # Run training
     trainer.run()
 

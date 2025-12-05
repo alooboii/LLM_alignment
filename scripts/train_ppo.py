@@ -37,12 +37,6 @@ Reference:
 
 import os
 import sys
-# Add project root to path for Kaggle
-from pathlib import Path
-PROJECT_ROOT = Path(__file__).parent.parent
-import sys
-sys.path.insert(0, str(PROJECT_ROOT))
-
 import json
 import logging
 from pathlib import Path
@@ -87,20 +81,12 @@ from trl import (
 )
 
 # Import config
-from config.default_config import get_default_config
-
-# Import helper modules with error handling
-try:
-    from scripts.checkpoint_cleanup import cleanup_old_checkpoints
-except ImportError:
-    def cleanup_old_checkpoints(checkpoint_dir, keep_n=2):
-        """Fallback function if cleanup module not found"""
-        import shutil
-        from pathlib import Path
-        checkpoints = sorted(Path(checkpoint_dir).glob('checkpoint_*'), key=lambda x: x.stat().st_mtime, reverse=True)
-        for ckpt in checkpoints[keep_n:]:
-            if ckpt.is_dir():
-                shutil.rmtree(ckpt)
+from config.default_config import (
+    parse_ppo_args,
+    get_config_from_args,
+    save_args_to_json,
+    Config
+)
 
 # Setup logging
 logging.basicConfig(
@@ -113,7 +99,7 @@ logger = logging.getLogger(__name__)
 class PPOModelTrainer:
     """Main trainer class for PPO alignment"""
     
-    def __init__(self, args, config):
+    def __init__(self, args, config: Config):
         self.args = args
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -161,18 +147,12 @@ class PPOModelTrainer:
         """Save arguments and config"""
         # Save args
         args_path = self.save_dir / "args.json"
-        with open(args_path, 'w') as f:
-            json.dump(vars(self.args), f, indent=2)
+        save_args_to_json(self.args, str(args_path))
         logger.info(f"Saved args to {args_path}")
         
         # Save config
         config_path = self.save_dir / "config.json"
-        config_dict = {
-            'data': vars(self.config.data) if hasattr(self.config.data, '__dict__') else {},
-            'base_model': vars(self.config.base_model) if hasattr(self.config.base_model, '__dict__') else {},
-        }
-        with open(config_path, 'w') as f:
-            json.dump(config_dict, f, indent=2, default=str)
+        self.config.save(str(config_path))
         logger.info(f"Saved config to {config_path}")
     
     def setup_tokenizer(self):
@@ -306,11 +286,6 @@ class PPOModelTrainer:
         if self.args.load_in_8bit or self.args.load_in_4bit:
             base_model = prepare_model_for_kbit_training(base_model)
             logger.info("Prepared model for quantized training")
-            
-            # CRITICAL FIX: Disable gradient checkpointing after prepare_model_for_kbit_training
-            if hasattr(base_model, 'gradient_checkpointing_disable'):
-                base_model.gradient_checkpointing_disable()
-                logger.info("✓ Disabled gradient checkpointing for quantized base model")
         
         # Apply LoRA if specified
         if self.args.use_lora:
@@ -387,7 +362,7 @@ class PPOModelTrainer:
         
         return dense_rewards
     
-    def generate_rollouts(self, prompts: List[str]) -> Tuple[List[str], List[torch.Tensor]]:
+    def generate_rollouts(self, prompts: List[str]) -> Tuple[List[str], List[torch.Tensor], List[torch.Tensor]]:
         """Generate responses for prompts"""
         responses = []
         response_tensors = []
@@ -430,17 +405,17 @@ class PPOModelTrainer:
         
         # Setup PPO config
         ppo_config = PPOConfig(
+            # Model settings
+            model_name=self.args.model_name,
+            
             # Training hyperparameters
             learning_rate=self.args.learning_rate,
             batch_size=self.args.batch_size,
             mini_batch_size=self.args.mini_batch_size,
             gradient_accumulation_steps=self.args.gradient_accumulation_steps,
-            optimize_cuda_cache=True,
-            early_stopping=False,
-            ppo_epochs=self.config.ppo.num_epochs,
-            max_grad_norm=1.0,
-            seed=self.args.seed,
-            log_with=None,
+            
+            # PPO-specific
+            ppo_epochs=self.args.ppo_epochs,
             
             # KL penalty
             init_kl_coef=self.args.kl_coef,
@@ -453,8 +428,13 @@ class PPOModelTrainer:
             # Clipping
             cliprange=self.args.clip_range,
             cliprange_value=self.args.clip_range_vf if self.args.clip_range_vf else self.args.clip_range,
-
+            
+            # Logging
+            log_with="tensorboard",
             project_kwargs={"logging_dir": str(self.logs_dir)},
+            
+            # Seed
+            seed=self.args.seed,
         )
         
         # Create PPO trainer
@@ -559,18 +539,11 @@ class PPOModelTrainer:
                     checkpoint_path = self.checkpoint_dir / f"checkpoint_{global_step}"
                     self.model.save_pretrained(checkpoint_path)
                     logger.info(f"Saved checkpoint at step {global_step}")
-                    
-                    # Keep only 2 most recent checkpoints
-                    cleanup_old_checkpoints(self.checkpoint_dir, keep_n=2)
             
             # End of epoch - save checkpoint
             epoch_checkpoint_path = self.checkpoint_dir / f"epoch_{epoch + 1}"
             self.model.save_pretrained(epoch_checkpoint_path)
             logger.info(f"Saved epoch {epoch + 1} checkpoint")
-            
-            # Keep only 2 most recent checkpoints
-            cleanup_old_checkpoints(self.checkpoint_dir, keep_n=2)
-            
         
         # Save final model
         logger.info("Saving final model...")
@@ -690,13 +663,14 @@ class PPOModelTrainer:
                 # Get log probs from both models
                 full_ids = policy_output.sequences
                 
-                # Policy logits
+                # Policy logits (full_ids already on correct device)
                 policy_outputs = self.model.pretrained_model(input_ids=full_ids)
                 policy_logits = policy_outputs.logits
                 
-                # Reference logits
-                ref_outputs = self.ref_model.pretrained_model(input_ids=full_ids)
-                ref_logits = ref_outputs.logits
+                # Reference logits (move full_ids to ref_model device)
+                ref_full_ids = full_ids.to(self.ref_model.pretrained_model.device)
+                ref_outputs = self.ref_model.pretrained_model(input_ids=ref_full_ids)
+                ref_logits = ref_outputs.logits.to(policy_logits.device)
                 
                 # Compute log probs
                 policy_log_probs = torch.log_softmax(policy_logits, dim=-1)
@@ -973,62 +947,11 @@ class PPOModelTrainer:
 
 def main():
     """Main entry point"""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='PPO Training')
-    
-    # Basic args
-    parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--epochs', type=int, default=3)
-    parser.add_argument('--batch_size', type=int, default=16)
-    parser.add_argument('--mini_batch_size', type=int, default=1)
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=4)
-    parser.add_argument('--learning_rate', type=float, default=1e-5)
-    
-    # PPO specific
-    parser.add_argument('--kl_coef', type=float, default=0.05)
-    parser.add_argument('--target_kl', type=float, default=0.1)
-    parser.add_argument('--clip_range', type=float, default=0.2)
-    parser.add_argument('--clip_range_vf', type=float, default=None)
-    parser.add_argument('--vf_coef', type=float, default=0.5)
-    parser.add_argument('--ppo_epochs', type=int, default=4)
-    parser.add_argument('--reward_mode', type=str, default='sparse', choices=['sparse', 'dense'])
-    
-    # Paths
-    parser.add_argument('--save_dir', type=str, default=None)
-    parser.add_argument('--output_dir', type=str, default='checkpoints')
-    parser.add_argument('--data_dir', type=str, default='data/processed')
-    parser.add_argument('--reward_model_path', type=str, required=True)
-    
-    # Model
-    parser.add_argument('--model_name', type=str, default='HuggingFaceTB/SmolLM2-135M-Instruct')
-    parser.add_argument('--max_length', type=int, default=512)
-    parser.add_argument('--max_new_tokens', type=int, default=256)
-    
-    # Generation
-    parser.add_argument('--temperature', type=float, default=0.7)
-    parser.add_argument('--top_k', type=int, default=50)
-    parser.add_argument('--top_p', type=float, default=0.95)
-    parser.add_argument('--do_sample', action='store_true', default=True)
-    
-    # Quantization
-    parser.add_argument('--load_in_8bit', action='store_true', default=True)
-    parser.add_argument('--load_in_4bit', action='store_true', default=False)
-    parser.add_argument('--mixed_precision', type=str, default='fp16')
-    
-    # LoRA
-    parser.add_argument('--use_lora', action='store_true', default=True)
-    parser.add_argument('--lora_r', type=int, default=8)
-    parser.add_argument('--lora_alpha', type=int, default=16)
-    parser.add_argument('--lora_dropout', type=float, default=0.05)
-    
-    # Logging
-    parser.add_argument('--logging_steps', type=int, default=10)
-    
-    args = parser.parse_args()
+    # Parse arguments
+    args = parse_ppo_args()
     
     # Get config
-    config = get_default_config()
+    config = get_config_from_args(args)
     
     # Create trainer
     trainer = PPOModelTrainer(args, config)

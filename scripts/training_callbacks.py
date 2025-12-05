@@ -238,14 +238,16 @@ class PerEpochMetricsCallback(TrainerCallback):
                         return_tensors='pt',
                         truncation=True,
                         max_length=512
-                    ).to(model.device)
+                    )
                     
                     # Get policy logits
-                    policy_outputs = model(**inputs)
+                    policy_inputs = {k: v.to(model.device) for k, v in inputs.items()}
+                    policy_outputs = model(**policy_inputs)
                     policy_logits = policy_outputs.logits
                     
                     # Get reference logits
-                    ref_outputs = self.reference_model(**inputs.to(self.reference_model.device))
+                    ref_inputs = {k: v.to(self.reference_model.device) for k, v in inputs.items()}
+                    ref_outputs = self.reference_model(**ref_inputs)
                     ref_logits = ref_outputs.logits.to(policy_logits.device)
                     
                     # Compute KL per token
@@ -461,12 +463,14 @@ class CustomPPOCallback:
                         return_tensors='pt',
                         truncation=True,
                         max_length=512
-                    ).to(model.device)
+                    )
                     
-                    policy_outputs = model(**inputs)
+                    policy_inputs = {k: v.to(model.device) for k, v in inputs.items()}
+                    policy_outputs = model(**policy_inputs)
                     policy_logits = policy_outputs.logits
                     
-                    ref_outputs = self.reference_model(**inputs.to(self.reference_model.device))
+                    ref_inputs = {k: v.to(self.reference_model.device) for k, v in inputs.items()}
+                    ref_outputs = self.reference_model(**ref_inputs)
                     ref_logits = ref_outputs.logits.to(policy_logits.device)
                     
                     policy_log_probs = torch.nn.functional.log_softmax(policy_logits, dim=-1)
