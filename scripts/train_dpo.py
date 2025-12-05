@@ -57,12 +57,7 @@ from peft import (
 from trl import DPOTrainer, DPOConfig
 
 # Import config
-from config.default_config import (
-    parse_dpo_args,
-    get_config_from_args,
-    save_args_to_json,
-    Config
-)
+from config.default_config import get_default_config
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -74,7 +69,7 @@ logger = logging.getLogger(__name__)
 class DPOModelTrainer:
     """Main trainer class for DPO alignment"""
     
-    def __init__(self, args, config: Config):
+    def __init__(self, args, config):
         self.args = args
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -118,12 +113,18 @@ class DPOModelTrainer:
         """Save arguments and config"""
         # Save args
         args_path = self.save_dir / "args.json"
-        save_args_to_json(self.args, str(args_path))
+        with open(args_path, 'w') as f:
+            json.dump(vars(self.args), f, indent=2)
         logger.info(f"Saved args to {args_path}")
-        
+
         # Save config
         config_path = self.save_dir / "config.json"
-        self.config.save(str(config_path))
+        config_dict = {
+            'data': vars(self.config.data) if hasattr(self.config.data, '__dict__') else {},
+            'base_model': vars(self.config.base_model) if hasattr(self.config.base_model, '__dict__') else {},
+        }
+        with open(config_path, 'w') as f:
+            json.dump(config_dict, f, indent=2, default=str)
         logger.info(f"Saved config to {config_path}")
     
     def setup_tokenizer(self):
@@ -787,15 +788,65 @@ class DPOModelTrainer:
 
 def main():
     """Main entry point"""
-    # Parse arguments
-    args = parse_dpo_args()
-    
+    import argparse
+
+    parser = argparse.ArgumentParser(description='DPO Training')
+
+    # Basic args
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=4)
+    parser.add_argument('--learning_rate', type=float, default=5e-5)
+    parser.add_argument('--weight_decay', type=float, default=0.01)
+    parser.add_argument('--warmup_steps', type=int, default=100)
+    parser.add_argument('--max_grad_norm', type=float, default=1.0)
+
+    # DPO specific
+    parser.add_argument('--beta', type=float, default=0.1)
+    parser.add_argument('--loss_type', type=str, default='sigmoid', choices=['sigmoid', 'hinge', 'ipo'])
+    parser.add_argument('--label_smoothing', type=float, default=0.0)
+    parser.add_argument('--reference_model', type=str, default=None)
+
+    # Paths
+    parser.add_argument('--save_dir', type=str, default=None)
+    parser.add_argument('--output_dir', type=str, default='checkpoints')
+    parser.add_argument('--data_dir', type=str, default='data/processed')
+
+    # Model
+    parser.add_argument('--model_name', type=str, default='HuggingFaceTB/SmolLM2-135M-Instruct')
+    parser.add_argument('--max_length', type=int, default=512)
+
+    # Quantization
+    parser.add_argument('--load_in_8bit', action='store_true', default=True)
+    parser.add_argument('--load_in_4bit', action='store_true', default=False)
+    parser.add_argument('--mixed_precision', type=str, default='fp16')
+
+    # LoRA
+    parser.add_argument('--use_lora', action='store_true', default=True)
+    parser.add_argument('--lora_r', type=int, default=8)
+    parser.add_argument('--lora_alpha', type=int, default=16)
+    parser.add_argument('--lora_dropout', type=float, default=0.05)
+
+    # Logging
+    parser.add_argument('--logging_steps', type=int, default=10)
+    parser.add_argument('--eval_steps', type=int, default=100)
+    parser.add_argument('--save_steps', type=int, default=500)
+    parser.add_argument('--save_total_limit', type=int, default=2)
+    parser.add_argument('--num_workers', type=int, default=4)
+
+    # Optimizer
+    parser.add_argument('--optimizer', type=str, default='adamw_torch')
+    parser.add_argument('--lr_scheduler_type', type=str, default='cosine')
+
+    args = parser.parse_args()
+
     # Get config
-    config = get_config_from_args(args)
-    
+    config = get_default_config()
+
     # Create trainer
     trainer = DPOModelTrainer(args, config)
-    
+
     # Run training
     trainer.run()
 

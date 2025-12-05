@@ -1082,6 +1082,11 @@ def main():
     # Logging
     parser.add_argument('--logging_steps', type=int, default=10)
 
+    # Optimizer
+    parser.add_argument('--optimizer', type=str, default='adamw_torch')
+    parser.add_argument('--lr_scheduler_type', type=str, default='cosine')
+    parser.add_argument('--use_baseline', action='store_true', default=False)
+
     args = parser.parse_args()
 
     # Get config
