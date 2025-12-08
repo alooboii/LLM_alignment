@@ -243,10 +243,10 @@ class PPOModelTrainer:
                 logger.error(f"Failed to load reward model: {e2}")
                 raise
         
-        # CRITICAL FIX: Disable gradient checkpointing for quantized reward model
-        if hasattr(self.reward_model, 'gradient_checkpointing_disable'):
-            self.reward_model.gradient_checkpointing_disable()
-            logger.info("✓ Disabled gradient checkpointing for reward model")
+        # # CRITICAL FIX: Disable gradient checkpointing for quantized reward model
+        # if hasattr(self.reward_model, 'gradient_checkpointing_disable'):
+        #     self.reward_model.gradient_checkpointing_disable()
+        #     logger.info("✓ Disabled gradient checkpointing for reward model")
         
         # Freeze reward model
         for param in self.reward_model.parameters():
