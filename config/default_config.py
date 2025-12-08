@@ -173,7 +173,7 @@ class PPOConfig:
     
     # Training configuration
     num_epochs: int = 1
-    batch_size: int = 2
+    batch_size: int = 4
     mini_batch_size: int = 1
     gradient_accumulation_steps: int = 4
     learning_rate: float = 1e-5

@@ -992,6 +992,7 @@ def main():
     parser.add_argument('--clip_range_vf', type=float, default=None)
     parser.add_argument('--vf_coef', type=float, default=0.5)
     parser.add_argument('--ppo_epochs', type=int, default=2)
+    parser.add_argument('--adap_kl_ctrl', action='store_true', default=True)
 
     # Paths
     parser.add_argument('--save_dir', type=str, default=None)
