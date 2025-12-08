@@ -443,32 +443,19 @@ class PPOModelTrainer:
         
         # Setup PPO config
         ppo_config = PPOConfig(
-            # Training hyperparameters
             learning_rate=self.args.learning_rate,
             batch_size=self.args.batch_size,
             mini_batch_size=self.args.mini_batch_size,
             gradient_accumulation_steps=self.args.gradient_accumulation_steps,
-            
-            # PPO-specific
             ppo_epochs=self.args.ppo_epochs,
-            
-            # KL penalty
-            init_kl_coef=self.args.kl_coef,
+            init_kl_coef=self.args.init_kl_coef,   # ✅ Fixed
             target=self.args.target_kl,
-            adap_kl_ctrl=True,
-            
-            # Value function
+            adap_kl_ctrl=self.args.adap_kl_ctrl,   # ✅ Use from args
             vf_coef=self.args.vf_coef,
-            
-            # Clipping
             cliprange=self.args.clip_range,
             cliprange_value=self.args.clip_range_vf if self.args.clip_range_vf else self.args.clip_range,
-            
-            # Logging
             log_with="tensorboard",
             project_kwargs={"logging_dir": str(self.logs_dir)},
-            
-            # Seed
             seed=self.args.seed,
         )
         
@@ -487,7 +474,7 @@ class PPOModelTrainer:
         logger.info(f"Training examples: {len(self.train_dataset)}")
         logger.info(f"Batch size: {self.args.batch_size}")
         logger.info(f"Mini batch size: {self.args.mini_batch_size}")
-        logger.info(f"KL coefficient: {self.args.kl_coef}")
+        logger.info(f"KL coefficient: {self.args.init_kl_coef}")
         logger.info(f"Reward mode: {self.args.reward_mode}")
         logger.info(f"Max new tokens: {self.args.max_new_tokens}")
         logger.info("=" * 80)
@@ -570,7 +557,7 @@ class PPOModelTrainer:
                     continue
                 
                 # Save checkpoint periodically
-                if global_step % self.config.ppo.save_freq == 0:
+                if global_step % self.config.ppo.save_steps == 0:
                     checkpoint_path = self.checkpoint_dir / f"checkpoint_{global_step}"
                     self.model.save_pretrained(checkpoint_path)
                     logger.info(f"Saved checkpoint at step {global_step}")
@@ -842,7 +829,7 @@ class PPOModelTrainer:
                 'mini_batch_size': self.args.mini_batch_size,
                 'learning_rate': self.args.learning_rate,
                 'epochs': self.args.epochs,
-                'kl_coef': self.args.kl_coef,
+                'kl_coef': self.args.init_kl_coef,
                 'target_kl': self.args.target_kl,
                 'clip_range': self.args.clip_range,
                 'ppo_epochs': self.args.ppo_epochs,
@@ -881,7 +868,7 @@ class PPOModelTrainer:
             f"- Mini Batch Size: {self.args.mini_batch_size}",
             f"- Learning Rate: {self.args.learning_rate}",
             f"- Epochs: {self.args.epochs}",
-            f"- KL Coefficient: {self.args.kl_coef}",
+            f"- KL Coefficient: {self.args.init_kl_coef}",
             f"- Target KL: {self.args.target_kl}",
             f"- Clip Range: {self.args.clip_range}",
             f"- PPO Epochs: {self.args.ppo_epochs}",
@@ -999,12 +986,12 @@ def main():
 
     # PPO specific
     parser.add_argument('--reward_mode', type=str, default='sparse', choices=['sparse', 'dense'])
-    parser.add_argument('--kl_coef', type=float, default=0.05)
+    parser.add_argument('--init_kl_coef', type=float, default=0.05)
     parser.add_argument('--target_kl', type=float, default=0.1)
     parser.add_argument('--clip_range', type=float, default=0.2)
     parser.add_argument('--clip_range_vf', type=float, default=None)
     parser.add_argument('--vf_coef', type=float, default=0.5)
-    parser.add_argument('--ppo_epochs', type=int, default=4)
+    parser.add_argument('--ppo_epochs', type=int, default=2)
 
     # Paths
     parser.add_argument('--save_dir', type=str, default=None)
@@ -1024,8 +1011,8 @@ def main():
     parser.add_argument('--do_sample', action='store_true', default=True)
 
     # Quantization
-    parser.add_argument('--load_in_8bit', action='store_true', default=True)
-    parser.add_argument('--load_in_4bit', action='store_true', default=False)
+    parser.add_argument('--load_in_8bit', action='store_true', default=False)
+    parser.add_argument('--load_in_4bit', action='store_true', default=True)
     parser.add_argument('--mixed_precision', type=str, default='fp16')
 
     # LoRA
@@ -1040,6 +1027,7 @@ def main():
     # Optimizer
     parser.add_argument('--optimizer', type=str, default='adamw_torch')
     parser.add_argument('--lr_scheduler_type', type=str, default='cosine')
+    parser.add_argument('--save_steps', type=int, default=500)
 
     args = parser.parse_args()
 

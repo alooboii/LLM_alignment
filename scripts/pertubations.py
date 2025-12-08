@@ -192,9 +192,9 @@ class PerturbationTester:
                 logger.error(f"Failed to load reward model: {e2}")
                 raise
         
-        if hasattr(self.reward_model, 'gradient_checkpointing_disable'):
-            self.reward_model.gradient_checkpointing_disable()
-            logger.info("✓ Disabled gradient checkpointing for reward model")
+        # if hasattr(self.reward_model, 'gradient_checkpointing_disable'):
+        #     self.reward_model.gradient_checkpointing_disable()
+        #     logger.info("✓ Disabled gradient checkpointing for reward model")
         
         self.reward_model.eval()
         logger.info("Reward model loaded")
@@ -220,9 +220,9 @@ class PerturbationTester:
             )
             
             # CRITICAL FIX: Disable gradient checkpointing for quantized base model
-            if hasattr(base_model, 'gradient_checkpointing_disable'):
-                base_model.gradient_checkpointing_disable()
-                logger.info("✓ Disabled gradient checkpointing for base model")
+            # if hasattr(base_model, 'gradient_checkpointing_disable'):
+            #     base_model.gradient_checkpointing_disable()
+            #     logger.info("✓ Disabled gradient checkpointing for base model")
             
             self.policy_model = PeftModel.from_pretrained(base_model, str(model_path))
         else:
@@ -234,9 +234,9 @@ class PerturbationTester:
             )
             
             # CRITICAL FIX: Disable gradient checkpointing for quantized policy model
-            if hasattr(self.policy_model, 'gradient_checkpointing_disable'):
-                self.policy_model.gradient_checkpointing_disable()
-                logger.info("✓ Disabled gradient checkpointing for policy model")
+            # if hasattr(self.policy_model, 'gradient_checkpointing_disable'):
+            #     self.policy_model.gradient_checkpointing_disable()
+            #     logger.info("✓ Disabled gradient checkpointing for policy model")
         
         self.policy_model.eval()
         logger.info("Policy model loaded")

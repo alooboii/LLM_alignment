@@ -567,7 +567,6 @@ class GRPOModelTrainer:
             except RuntimeError as e:
                 if "CUDA" in str(e) or "cublas" in str(e).lower():
                     logger.warning(f"Training step failed: {e}")
-                    torch.cuda.empty_cache()
                     continue
                 else:
                     raise
@@ -692,7 +691,6 @@ class GRPOModelTrainer:
                 except RuntimeError as e:
                     if "CUDA" in str(e) or "cublas" in str(e).lower():
                         logger.warning(f"Training step failed: {e}")
-                        torch.cuda.empty_cache()
                         continue
                     else:
                         raise
@@ -701,7 +699,7 @@ class GRPOModelTrainer:
                     continue
                 
                 # Save checkpoint periodically
-                if global_step % self.config.grpo.save_freq == 0:
+                if global_step % self.config.grpo.save_steps == 0:
                     checkpoint_path = self.checkpoint_dir / f"checkpoint_{global_step}"
                     self.model.save_pretrained(checkpoint_path)
                     logger.info(f"Saved checkpoint at step {global_step}")
@@ -1122,8 +1120,8 @@ def main():
     parser.add_argument('--do_sample', action='store_true', default=True)
 
     # Quantization
-    parser.add_argument('--load_in_8bit', action='store_true', default=True)
-    parser.add_argument('--load_in_4bit', action='store_true', default=False)
+    parser.add_argument('--load_in_8bit', action='store_true', default=False)
+    parser.add_argument('--load_in_4bit', action='store_true', default=True)
     parser.add_argument('--mixed_precision', type=str, default='fp16')
 
     # LoRA

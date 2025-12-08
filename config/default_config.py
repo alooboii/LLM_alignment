@@ -78,13 +78,15 @@ class DataConfig:
     # Template formats
     prompt_template: str = "Question: {prompt}\n\nAnswer:"
     response_template: str = " {response}"
+
 @dataclass
 class ModelConfig:
     model_name: str = "HuggingFaceTB/SmolLM2-135M-Instruct"
     tokenizer_name: Optional[str] = None
     use_auth_token: bool = False
     trust_remote_code: bool = True
-    load_in_8bit: bool = True
+    load_in_8bit: bool = False  # Changed to False, use 4-bit instead
+    load_in_4bit: bool = True   # Default to 4-bit
     device_map: str = "auto"
     torch_dtype: str = "float16"
     padding_side: str = "left"
@@ -103,8 +105,8 @@ class ModelConfig:
 @dataclass
 class RewardModelConfig:
     base_model: str = "HuggingFaceTB/SmolLM2-135M-Instruct"
-    num_epochs: int = 3
-    batch_size: int = 8
+    num_epochs: int = 2
+    batch_size: int = 4
     gradient_accumulation_steps: int = 4
     learning_rate: float = 5e-5
     weight_decay: float = 0.01
@@ -132,7 +134,7 @@ class DPOConfig:
     base_model: str = "HuggingFaceTB/SmolLM2-135M-Instruct"
     beta: float = 0.1
     reference_free: bool = False
-    num_epochs: int = 3
+    num_epochs: int = 1
     batch_size: int = 4
     gradient_accumulation_steps: int = 4
     learning_rate: float = 5e-5
@@ -154,35 +156,59 @@ class DPOConfig:
 @dataclass
 class PPOConfig:
     method: str = "PPO"
-    reward_mode: str = "sparse"
+    reward_mode: str = "sparse"  # "sparse" or "dense"
     base_model: str = "HuggingFaceTB/SmolLM2-135M-Instruct"
     reward_model_path: str = "models/reward_model/final_model"
-    kl_coef: float = 0.05
-    clip_range: float = 0.2
-    vf_coef: float = 0.5
-    gamma: float = 0.99
-    lam: float = 0.95
-    num_epochs: int = 3
-    batch_size: int = 4
+    
+    # PPO-specific hyperparameters
+    init_kl_coef: float = 0.05  # Initial KL penalty coefficient
+    target_kl: float = 0.1      # Target KL divergence
+    adap_kl_ctrl: bool = True   # Adaptive KL control
+    clip_range: float = 0.2     # PPO clipping range
+    clip_range_vf: Optional[float] = None  # Value function clipping (defaults to clip_range)
+    vf_coef: float = 0.5        # Value function coefficient
+    ppo_epochs: int = 2         # Number of PPO epochs per batch
+    gamma: float = 0.99         # Discount factor
+    lam: float = 0.95           # GAE lambda
+    
+    # Training configuration
+    num_epochs: int = 1
+    batch_size: int = 2
     mini_batch_size: int = 1
     gradient_accumulation_steps: int = 4
     learning_rate: float = 1e-5
     weight_decay: float = 0.01
     warmup_steps: int = 100
     max_grad_norm: float = 1.0
+    
+    # Generation configuration
     max_new_tokens: int = 256
     temperature: float = 0.7
     top_k: int = 50
     top_p: float = 0.95
+    do_sample: bool = True
+    
+    # LoRA configuration
     use_lora: bool = True
     lora_r: int = 8
     lora_alpha: int = 16
     lora_dropout: float = 0.05
     lora_target_modules: List[str] = field(default_factory=lambda: ["q_proj", "v_proj"])
+    
+    # Logging and saving
     logging_steps: int = 10
     save_steps: int = 500
     save_total_limit: int = 2
-    save_freq: int = 500
+    
+    # Quantization
+    load_in_8bit: bool = False
+    load_in_4bit: bool = True
+    mixed_precision: str = "fp16"
+    
+    # Optimizer
+    optimizer: str = "adamw_torch"
+    lr_scheduler_type: str = "cosine"
+    
     seed: int = 42
 
 @dataclass
@@ -212,7 +238,6 @@ class GRPOConfig:
     logging_steps: int = 10
     save_steps: int = 500
     save_total_limit: int = 2
-    save_freq: int = 500
     seed: int = 42
 
 @dataclass
@@ -224,7 +249,6 @@ class EvalConfig:
     metrics: List[str] = field(default_factory=lambda: ["reward", "kl_divergence", "perplexity", "length", "compliance"])
     perturbations: List[str] = field(default_factory=lambda: ["filler_phrases", "sentence_reorder", "synonym_replace", "formatting", "alignment_keywords"])
     seed: int = 42
-
 
 @dataclass
 class LoRAConfig:
@@ -238,11 +262,6 @@ class PerturbationConfig:
 @dataclass  
 class HardwareConfig:
     gradient_checkpointing: bool = False
-
-@dataclass
-class LoRAConfig:
-    bias: str = "none"
-    target_modules: List[str] = field(default_factory=lambda: ["q_proj", "v_proj"])
 
 class Config:
     """Main configuration class"""

@@ -186,10 +186,10 @@ class ModelEvaluator:
             )
             
             # CRITICAL FIX: Disable gradient checkpointing for quantized base model
-            if self.args.load_in_8bit or getattr(self.args, 'load_in_4bit', False):
-                if hasattr(base_model, 'gradient_checkpointing_disable'):
-                    base_model.gradient_checkpointing_disable()
-                    logger.info("✓ Disabled gradient checkpointing for quantized base model")
+            # if self.args.load_in_8bit or getattr(self.args, 'load_in_4bit', False):
+            #     if hasattr(base_model, 'gradient_checkpointing_disable'):
+            #         base_model.gradient_checkpointing_disable()
+            #         logger.info("✓ Disabled gradient checkpointing for quantized base model")
             
             # Load adapter
             self.model = PeftModel.from_pretrained(base_model, str(model_path))
@@ -208,10 +208,10 @@ class ModelEvaluator:
             )
             
             # CRITICAL FIX: Disable gradient checkpointing for quantized model
-            if self.args.load_in_8bit or getattr(self.args, 'load_in_4bit', False):
-                if hasattr(self.model, 'gradient_checkpointing_disable'):
-                    self.model.gradient_checkpointing_disable()
-                    logger.info("✓ Disabled gradient checkpointing for quantized model")
+            # if self.args.load_in_8bit or getattr(self.args, 'load_in_4bit', False):
+            #     if hasattr(self.model, 'gradient_checkpointing_disable'):
+            #         self.model.gradient_checkpointing_disable()
+            #         logger.info("✓ Disabled gradient checkpointing for quantized model")
         
         self.model.eval()
         logger.info("Model loaded and set to eval mode")
