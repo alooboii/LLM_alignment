@@ -65,6 +65,8 @@ from transformers import (
     AutoModelForSequenceClassification,
     set_seed,
     GenerationConfig
+,
+    BitsAndBytesConfig
 )
 from datasets import load_dataset, Dataset as HFDataset
 from peft import (
@@ -92,6 +94,38 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def create_quantization_config(load_in_4bit=True, load_in_8bit=False, mixed_precision='fp16'):
+    """
+    Create BitsAndBytesConfig for optimal 4-bit quantization
+    
+    Args:
+        load_in_4bit: Whether to use 4-bit quantization
+        load_in_8bit: Whether to use 8-bit quantization
+        mixed_precision: Mixed precision setting ('fp16' or 'bf16')
+    
+    Returns:
+        BitsAndBytesConfig or None
+    """
+    if load_in_4bit:
+        import torch
+        from transformers import BitsAndBytesConfig
+        
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",  # Normal Float 4-bit
+            bnb_4bit_compute_dtype=torch.float16 if mixed_precision == "fp16" else torch.bfloat16,
+            bnb_4bit_use_double_quant=True,  # Nested quantization
+        )
+        logger.info("✓ Created 4-bit quantization config (NF4 + double quantization)")
+        return bnb_config
+    elif load_in_8bit:
+        logger.info("✓ Using 8-bit quantization")
+        return None
+    else:
+        logger.info("✓ No quantization (full precision)")
+        return None
+
 
 
 class PPOModelTrainer:
@@ -189,7 +223,7 @@ class PPOModelTrainer:
             self.reward_model = AutoModelForSequenceClassification.from_pretrained(
                 self.args.reward_model_path,
                 num_labels=1,
-                load_in_8bit=True,
+                load_in_4bit=True,  # FIXED: Use 4-bit instead of 8-bit,
                 device_map="auto",
                 trust_remote_code=self.config.base_model.trust_remote_code,
             )
@@ -200,7 +234,7 @@ class PPOModelTrainer:
                 base_model = AutoModelForSequenceClassification.from_pretrained(
                     self.args.model_name,
                     num_labels=1,
-                    load_in_8bit=True,
+                    load_in_4bit=True,  # FIXED: Use 4-bit instead of 8-bit,
                     device_map="auto",
                     trust_remote_code=self.config.base_model.trust_remote_code,
                 )

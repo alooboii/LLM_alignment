@@ -45,7 +45,8 @@ from transformers import (
     TrainingArguments,
     Trainer,
     EarlyStoppingCallback,
-    set_seed
+    set_seed,
+    BitsAndBytesConfig
 )
 from datasets import load_dataset, Dataset as HFDataset
 from peft import (
@@ -70,6 +71,36 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def create_quantization_config(load_in_4bit: bool, load_in_8bit: bool, mixed_precision: str = 'fp16'):
+    """
+    Create BitsAndBytesConfig for optimal 4-bit quantization
+    
+    Args:
+        load_in_4bit: Whether to use 4-bit quantization
+        load_in_8bit: Whether to use 8-bit quantization  
+        mixed_precision: Mixed precision setting ('fp16' or 'bf16')
+    
+    Returns:
+        BitsAndBytesConfig or None
+    """
+    if load_in_4bit:
+        import torch
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",  # Normal Float 4-bit quantization
+            bnb_4bit_compute_dtype=torch.float16 if mixed_precision == "fp16" else torch.bfloat16,
+            bnb_4bit_use_double_quant=True,  # Nested quantization for additional memory savings
+        )
+        logger.info("✓ Created 4-bit quantization config (NF4 + double quantization)")
+        return bnb_config
+    elif load_in_8bit:
+        logger.info("✓ Using 8-bit quantization")
+        return None  # 8-bit is handled by load_in_8bit parameter
+    else:
+        logger.info("✓ No quantization (full precision)")
+        return None
 
 
 class RewardDataset(Dataset):
@@ -308,23 +339,32 @@ class RewardModelTrainer:
         """Initialize reward model"""
         logger.info(f"Loading model: {self.args.model_name}")
         
-        # Load model
+        # Create quantization config
+        bnb_config = create_quantization_config(
+            self.args.load_in_4bit,
+            self.args.load_in_8bit,
+            self.args.mixed_precision
+        )
+        
+        # Load model with proper quantization
         self.model = AutoModelForSequenceClassification.from_pretrained(
             self.args.model_name,
             num_labels=1,  # Scalar reward output
-            load_in_8bit=self.args.load_in_8bit,
-            load_in_4bit=self.args.load_in_4bit,
+            quantization_config=bnb_config if bnb_config else None,
+            load_in_8bit=self.args.load_in_8bit if not bnb_config else False,
             device_map="auto",
             trust_remote_code=self.config.base_model.trust_remote_code,
         )
+        logger.info(f"✓ Loaded model with quantization: 4-bit={self.args.load_in_4bit}, 8-bit={self.args.load_in_8bit}")
+        
         if self.args.load_in_8bit or self.args.load_in_4bit:
             self.model = prepare_model_for_kbit_training(self.model)
-            logger.info("Prepared model for quantized training")
+            logger.info("✓ Prepared model for quantized training")
             
             # NOW disable gradient checkpointing (after prepare_model_for_kbit_training)
             if hasattr(self.model, 'gradient_checkpointing_disable'):
                 self.model.gradient_checkpointing_disable()
-                logger.info("Disabled gradient checkpointing after prepare_model_for_kbit_training")
+                logger.info("✓ Disabled gradient checkpointing after prepare_model_for_kbit_training")
         
         
         # Apply LoRA if specified
@@ -701,6 +741,38 @@ class RewardModelTrainer:
         logger.info("Starting Reward Model Training Pipeline")
         logger.info("=" * 80)
         
+        # Check if model already exists (for resume functionality)
+        final_model_path = self.save_dir / "final_model"
+        
+        if final_model_path.exists() and not self.args.force_retrain:
+            if self.args.resume:
+                logger.info("\n" + "=" * 80)
+                logger.info("✓ EXISTING REWARD MODEL FOUND!")
+                logger.info("=" * 80)
+                logger.info(f"Model path: {final_model_path}")
+                logger.info("Skipping training (use --force_retrain to override)")
+                logger.info("=" * 80 + "\n")
+                
+                # Verify model can be loaded
+                try:
+                    from transformers import AutoModelForSequenceClassification
+                    logger.info("Validating model can be loaded...")
+                    test_model = AutoModelForSequenceClassification.from_pretrained(
+                        str(final_model_path),
+                        device_map="cpu"
+                    )
+                    del test_model  # Free memory
+                    logger.info("✓ Model validation successful")
+                    logger.info("=" * 80)
+                    return  # Exit without training
+                except Exception as e:
+                    logger.error(f"✗ Model validation failed: {e}")
+                    logger.error("Model exists but is corrupted. Proceeding with training...")
+            else:
+                logger.warning(f"\n⚠️  Model already exists at {final_model_path}")
+                logger.warning("Use --resume to skip training or --force_retrain to override")
+                logger.warning("Proceeding with training (may overwrite)...\n")
+        
         try:
             # Save configuration
             self.save_config()
@@ -768,7 +840,7 @@ def main():
     
     # Quantization
     parser.add_argument('--load_in_8bit', action='store_true', default=False)
-    parser.add_argument('--load_in_4bit', action='store_true', default=True)
+    parser.add_argument('--load_in_4bit', action='store_true', default=False)  # FIXED: was default=True
     parser.add_argument('--mixed_precision', type=str, default='fp16')
     
     # LoRA
@@ -785,10 +857,20 @@ def main():
     parser.add_argument('--save_total_limit', type=int, default=2)
     parser.add_argument('--logging_steps', type=int, default=10)
     parser.add_argument('--num_workers', type=int, default=0)
-    parser.add_argument('--max_steps', type=int, default=-1)  # Add this
+    parser.add_argument('--max_steps', type=int, default=-1)
     
+    # Checkpoint/Resume options
+    parser.add_argument('--resume', action='store_true', 
+                       help='Skip training if model already exists at save_dir')
+    parser.add_argument('--force_retrain', action='store_true',
+                       help='Force retraining even if model exists')
     
     args = parser.parse_args()
+    
+    # IMPORTANT: Enable 4-bit quantization by default if no quantization specified
+    if not args.load_in_8bit and not args.load_in_4bit:
+        args.load_in_4bit = True
+        logger.info("✓ Enabled 4-bit quantization by default (no --load_in_8bit or --load_in_4bit specified)")
     
     # Get config
     config = get_default_config()

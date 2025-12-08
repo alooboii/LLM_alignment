@@ -44,6 +44,8 @@ from transformers import (
     AutoModelForCausalLM,
     set_seed,
     GenerationConfig
+,
+    BitsAndBytesConfig
 )
 from peft import PeftModel
 
@@ -56,6 +58,38 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def create_quantization_config(load_in_4bit=True, load_in_8bit=False, mixed_precision='fp16'):
+    """
+    Create BitsAndBytesConfig for optimal 4-bit quantization
+    
+    Args:
+        load_in_4bit: Whether to use 4-bit quantization
+        load_in_8bit: Whether to use 8-bit quantization
+        mixed_precision: Mixed precision setting ('fp16' or 'bf16')
+    
+    Returns:
+        BitsAndBytesConfig or None
+    """
+    if load_in_4bit:
+        import torch
+        from transformers import BitsAndBytesConfig
+        
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",  # Normal Float 4-bit
+            bnb_4bit_compute_dtype=torch.float16 if mixed_precision == "fp16" else torch.bfloat16,
+            bnb_4bit_use_double_quant=True,  # Nested quantization
+        )
+        logger.info("✓ Created 4-bit quantization config (NF4 + double quantization)")
+        return bnb_config
+    elif load_in_8bit:
+        logger.info("✓ Using 8-bit quantization")
+        return None
+    else:
+        logger.info("✓ No quantization (full precision)")
+        return None
+
 
 
 class ModelEvaluator:
@@ -144,14 +178,15 @@ class ModelEvaluator:
             # Load base model
             base_model = AutoModelForCausalLM.from_pretrained(
                 base_model_name,
-                load_in_8bit=self.args.load_in_8bit,
+                load_in_4bit=getattr(self.args, 'load_in_4bit', False),
+                load_in_8bit=self.args.load_in_8bit if not getattr(self.args, 'load_in_4bit', False) else False,
                 device_map="auto",
                 trust_remote_code=self.config.base_model.trust_remote_code,
                 torch_dtype=torch.float16 if self.args.mixed_precision == "fp16" else "auto",
             )
             
             # CRITICAL FIX: Disable gradient checkpointing for quantized base model
-            if self.args.load_in_8bit:
+            if self.args.load_in_8bit or getattr(self.args, 'load_in_4bit', False):
                 if hasattr(base_model, 'gradient_checkpointing_disable'):
                     base_model.gradient_checkpointing_disable()
                     logger.info("✓ Disabled gradient checkpointing for quantized base model")
@@ -165,14 +200,15 @@ class ModelEvaluator:
             logger.info("Loading full model")
             self.model = AutoModelForCausalLM.from_pretrained(
                 str(model_path),
-                load_in_8bit=self.args.load_in_8bit,
+                load_in_4bit=getattr(self.args, 'load_in_4bit', False),
+                load_in_8bit=self.args.load_in_8bit if not getattr(self.args, 'load_in_4bit', False) else False,
                 device_map="auto",
                 trust_remote_code=self.config.base_model.trust_remote_code,
                 torch_dtype=torch.float16 if self.args.mixed_precision == "fp16" else "auto",
             )
             
             # CRITICAL FIX: Disable gradient checkpointing for quantized model
-            if self.args.load_in_8bit:
+            if self.args.load_in_8bit or getattr(self.args, 'load_in_4bit', False):
                 if hasattr(self.model, 'gradient_checkpointing_disable'):
                     self.model.gradient_checkpointing_disable()
                     logger.info("✓ Disabled gradient checkpointing for quantized model")
@@ -527,7 +563,8 @@ def main():
     parser.add_argument('--top_p', type=float, default=0.95)
     parser.add_argument('--num_samples', type=int, default=1)
     parser.add_argument('--max_length', type=int, default=512)
-    parser.add_argument('--load_in_8bit', action='store_true', default=True)
+    parser.add_argument('--load_in_8bit', action='store_true', default=False)
+    parser.add_argument('--load_in_4bit', action='store_true', default=True)
     parser.add_argument('--mixed_precision', type=str, default='fp16')
     parser.add_argument('--seed', type=int, default=42)
     

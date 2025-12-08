@@ -172,13 +172,51 @@ class ExperimentOrchestrator:
         logger.info("STAGE 2: REWARD MODEL TRAINING")
         logger.info("="*80 + "\n")
         
+        # Check if reward model already exists
+        reward_model_path = self.models_dir / "reward_model" / "final_model"
+        
+        if reward_model_path.exists():
+            logger.info("=" * 80)
+            logger.info("✓ EXISTING REWARD MODEL FOUND!")
+            logger.info("=" * 80)
+            logger.info(f"Path: {reward_model_path}")
+            logger.info("Skipping reward model training")
+            logger.info("(Delete the directory to force retraining)")
+            logger.info("=" * 80 + "\n")
+            
+            # Verify model is loadable
+            try:
+                from transformers import AutoModelForSequenceClassification
+                logger.info("Validating model...")
+                test_model = AutoModelForSequenceClassification.from_pretrained(
+                    str(reward_model_path),
+                    device_map="cpu"
+                )
+                del test_model
+                logger.info("✓ Model validation successful\n")
+            except Exception as e:
+                logger.error(f"✗ Model validation failed: {e}")
+                logger.error("Model exists but is corrupted. Will retrain...\n")
+                # Delete corrupted model and continue to training
+                import shutil
+                shutil.rmtree(self.models_dir / "reward_model", ignore_errors=True)
+            else:
+                # Model is valid, mark as completed
+                self.results['stages_completed'].append('reward_model_training')
+                self.results['reward_model_path'] = str(reward_model_path)
+                return True  # Success - using existing model
+        
+        # Model doesn't exist or was corrupted, train it
+        logger.info("No existing reward model found. Training from scratch...\n")
+        
         cmd = [
             sys.executable,
             str(self.scripts_dir / "train_reward_model.py"),
             "--epochs", str(self.epochs),
             "--batch_size", str(self.batch_size),
             "--seed", str(self.seeds[0]),
-            "--save_dir", str(self.models_dir / "reward_model")
+            "--save_dir", str(self.models_dir / "reward_model"),
+            "--resume"  # Enable resume mode
         ]
         
         # Add training control parameters
@@ -578,6 +616,11 @@ def main():
     # Error handling
     parser.add_argument('--stop_on_error', action='store_true',
                        help='Stop pipeline on first error')
+    
+    parser.add_argument('--resume', action='store_true', 
+                       help='Skip training if model already exists')
+    parser.add_argument('--force_retrain', action='store_true',
+                       help='Force retraining even if model exists')
     
     args = parser.parse_args()
     

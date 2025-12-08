@@ -54,6 +54,7 @@ from transformers import (
     TrainingArguments,
     Trainer,
     set_seed,
+    BitsAndBytesConfig
 )
 from datasets import load_dataset, Dataset as HFDataset
 from peft import (
@@ -77,6 +78,37 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def create_quantization_config(load_in_4bit: bool, load_in_8bit: bool, mixed_precision: str = 'fp16'):
+    """
+    Create BitsAndBytesConfig for optimal 4-bit quantization
+    
+    Args:
+        load_in_4bit: Whether to use 4-bit quantization
+        load_in_8bit: Whether to use 8-bit quantization  
+        mixed_precision: Mixed precision setting ('fp16' or 'bf16')
+    
+    Returns:
+        BitsAndBytesConfig or None
+    """
+    if load_in_4bit:
+        import torch
+        from transformers import BitsAndBytesConfig
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",  # Normal Float 4-bit quantization
+            bnb_4bit_compute_dtype=torch.float16 if mixed_precision == "fp16" else torch.bfloat16,
+            bnb_4bit_use_double_quant=True,  # Nested quantization for additional memory savings
+        )
+        logger.info("✓ Created 4-bit quantization config (NF4 + double quantization)")
+        return bnb_config
+    elif load_in_8bit:
+        logger.info("✓ Using 8-bit quantization")
+        return None  # 8-bit is handled by load_in_8bit parameter
+    else:
+        logger.info("✓ No quantization (full precision)")
+        return None
+
 
 
 class GRPOModelTrainer:
@@ -253,15 +285,23 @@ class GRPOModelTrainer:
         """Initialize policy model and reference model"""
         logger.info(f"Loading base model: {self.args.model_name}")
         
+        # Create quantization config
+        bnb_config = create_quantization_config(
+            self.args.load_in_4bit,
+            self.args.load_in_8bit,
+            self.args.mixed_precision
+        )
+        
         # Load policy model (trainable)
         self.model = AutoModelForCausalLM.from_pretrained(
             self.args.model_name,
-            load_in_8bit=self.args.load_in_8bit,
-            load_in_4bit=self.args.load_in_4bit,
+            quantization_config=bnb_config if bnb_config else None,
+            load_in_8bit=self.args.load_in_8bit if not bnb_config else False,
             device_map="auto",
             trust_remote_code=self.config.base_model.trust_remote_code,
             torch_dtype=torch.float16 if self.args.mixed_precision == "fp16" else torch.bfloat16 if self.args.mixed_precision == "bf16" else "auto",
         )
+        logger.info(f"✓ Loaded policy model with quantization: 4-bit={self.args.load_in_4bit}, 8-bit={self.args.load_in_8bit}")
         
         # Prepare for training if using quantization
         if self.args.load_in_8bit or self.args.load_in_4bit:
@@ -286,12 +326,22 @@ class GRPOModelTrainer:
         
         # Create frozen reference model (copy before LoRA)
         logger.info("Creating frozen reference model...")
+        
+        # Create quantization config for reference model
+        ref_bnb_config = create_quantization_config(
+            self.args.load_in_4bit,
+            self.args.load_in_8bit,
+            self.args.mixed_precision
+        )
+        
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             self.args.model_name,
-            load_in_8bit=True,
+            quantization_config=ref_bnb_config if ref_bnb_config else None,
+            load_in_8bit=self.args.load_in_8bit if not ref_bnb_config else False,
             device_map="auto",
             trust_remote_code=self.config.base_model.trust_remote_code,
         )
+        logger.info(f"✓ Loaded reference model with quantization: 4-bit={self.args.load_in_4bit}, 8-bit={self.args.load_in_8bit}")
         
         # Freeze reference model
         for param in self.ref_model.parameters():
@@ -1092,6 +1142,12 @@ def main():
 
     args = parser.parse_args()
 
+    
+    # IMPORTANT: Enable 4-bit quantization by default if no quantization specified
+    if not args.load_in_8bit and not args.load_in_4bit:
+        args.load_in_4bit = True
+        logger.info("✓ Enabled 4-bit quantization by default")
+    
     # Get config
     config = get_default_config()
 
