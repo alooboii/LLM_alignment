@@ -88,7 +88,7 @@ def create_quantization_config(load_in_4bit=True, load_in_8bit=False, mixed_prec
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",  # Normal Float 4-bit
-            bnb_4bit_compute_dtype=torch.float16 if mixed_precision == "fp16" else torch.bfloat16,
+            bnb_4bit_compute_dtype=torch.float16,
             bnb_4bit_use_double_quant=True,  # Nested quantization
         )
         logger.info("✓ Created 4-bit quantization config (NF4 + double quantization)")
@@ -854,8 +854,8 @@ def main():
     parser.add_argument('--max_length', type=int, default=512)
 
     # Quantization
-    parser.add_argument('--load_in_8bit', action='store_true', default=True)
-    parser.add_argument('--load_in_4bit', action='store_true', default=False)
+    parser.add_argument('--load_in_8bit', action='store_true', default=False)
+    parser.add_argument('--load_in_4bit', action='store_true', default=True)
     parser.add_argument('--mixed_precision', type=str, default='fp16')
 
     # LoRA

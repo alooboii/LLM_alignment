@@ -1,0 +1,32 @@
+{
+  "model_name": "HuggingFaceTB/SmolLM2-135M-Instruct",
+  "use_lora": true,
+  "lora_r": 8,
+  "quantization": "4-bit",
+  "seed": 123,
+  "training": {
+    "batch_size": 16,
+    "learning_rate": 5e-05,
+    "epochs": 2,
+    "optimizer": "adamw_torch"
+  },
+  "validation_metrics": {
+    "eval_loss": 0.1646585911512375,
+    "eval_accuracy": 0.8201468189233279,
+    "eval_auc": 0.8751111054930023,
+    "eval_precision": 0.8035576179427688,
+    "eval_recall": 0.8474714518760196,
+    "eval_f1": 0.8249305279872965,
+    "eval_runtime": 66.9476,
+    "eval_samples_per_second": 36.626,
+    "eval_steps_per_second": 1.15,
+    "epoch": 2.0
+  },
+  "reward_statistics": {
+    "chosen_mean": 0.7509016998440368,
+    "chosen_std": 0.29514119233114494,
+    "rejected_mean": 0.2578615410098438,
+    "rejected_std": 0.3374130340863174,
+    "margin": 0.49304015883419294
+  }
+}
