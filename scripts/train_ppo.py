@@ -335,9 +335,7 @@ class PPOModelTrainer:
         # Prepare for training if using quantization
         if self.args.load_in_8bit or self.args.load_in_4bit:
             self.model = prepare_model_for_kbit_training(self.model)
-        
-        # Print trainable parameters
-        self.model.print_trainable_parameters()
+            
         
         # ✅ Create frozen reference model (no value head needed)
         self.ref_model = AutoModelForCausalLM.from_pretrained(
