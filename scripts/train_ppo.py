@@ -442,147 +442,56 @@ class PPOModelTrainer:
         set_seed(self.args.seed)
         
         # Setup PPO config
-        set_seed(self.args.seed)
-    
-    # Setup PPO config - USING TRL'S ACTUAL PARAMETERS!
         ppo_config = PPOConfig(
             # Basic training params
             learning_rate=self.args.learning_rate,
-            batch_size=self.args.batch_size,
-            mini_batch_size=self.args.mini_batch_size,
+            per_device_train_batch_size=self.args.batch_size,
             gradient_accumulation_steps=self.args.gradient_accumulation_steps,
             
             # PPO-specific params (MATCHING TRL's actual names!)
-            num_ppo_epochs=self.args.num_ppo_epochs,      # ✅ NOT ppo_epochs
-            whiten_rewards=self.args.whiten_rewards,      # ✅ NEW
-            kl_coef=self.args.kl_coef,                    # ✅ NOT init_kl_coef
-            cliprange=self.args.cliprange,                # ✅ NOT clip_range
-            cliprange_value=self.args.cliprange_value,    # ✅ NOT clip_range_vf
+            num_ppo_epochs=self.args.num_ppo_epochs,
+            whiten_rewards=self.args.whiten_rewards,
+            kl_coef=self.args.kl_coef,
+            cliprange=self.args.cliprange,
+            cliprange_value=self.args.cliprange_value,
             vf_coef=self.args.vf_coef,
             gamma=self.args.gamma,
             lam=self.args.lam,
+            
+            # Generation config
+            response_length=self.args.max_new_tokens,
+            temperature=self.args.temperature,
+            
+            # Other required params
+            total_episodes=len(self.train_dataset) * self.args.epochs,
+            num_mini_batches=self.args.batch_size // self.args.mini_batch_size,
+            
+            # Paths
+            output_dir=str(self.save_dir),
+            logging_steps=self.args.logging_steps,
+            
+            # Seed
             seed=self.args.seed,
         )
         
-        # Create PPO trainer
+        # ✅ CRITICAL: TRL expects model WITHOUT value head already attached
+        # We added value head with AutoModelForCausalLMWithValueHead
+        # Need to extract the base model
+        base_model = self.model.pretrained_model  # Get base model without value head
+        
+        # Create PPO trainer with CORRECT parameters
         ppo_trainer = PPOTrainer(
-            config=ppo_config,
-            model=self.model,
+            args=ppo_config,  # ✅ NOT 'config'
+            processing_class=self.tokenizer,  # ✅ NOT 'tokenizer'
+            model=base_model,  # ✅ Base model without value head
             ref_model=self.ref_model,
-            tokenizer=self.tokenizer,
+            reward_model=self.reward_model,
+            train_dataset=self.train_dataset,
+            value_model=self.model.v_head,  # ✅ Separate value head
         )
         
-        # Training loop
-        logger.info("=" * 80)
-        logger.info("PPO Training Started")
-        logger.info("=" * 80)
-        logger.info(f"Training examples: {len(self.train_dataset)}")
-        logger.info(f"Batch size: {self.args.batch_size}")
-        logger.info(f"Mini batch size: {self.args.mini_batch_size}")
-        logger.info(f"KL coefficient: {self.args.kl_coef}")
-        logger.info(f"Reward mode: {self.args.reward_mode}")
-        logger.info(f"Max new tokens: {self.args.max_new_tokens}")
-        logger.info("=" * 80)
-        
-        # Training metrics
-        global_step = 0
-        total_batches = len(self.train_dataset) // self.args.batch_size
-        
-        for epoch in range(self.args.epochs):
-            logger.info(f"\n{'='*80}")
-            logger.info(f"Epoch {epoch + 1}/{self.args.epochs}")
-            logger.info(f"{'='*80}")
-            
-            # Shuffle dataset
-            shuffled_indices = np.random.permutation(len(self.train_dataset))
-            
-            # Process in batches
-            for batch_idx in tqdm(range(0, len(shuffled_indices), self.args.batch_size), 
-                                 desc=f"Epoch {epoch + 1}"):
-                # Get batch indices
-                batch_indices = shuffled_indices[batch_idx:batch_idx + self.args.batch_size]
-                
-                # Get batch data
-                batch = [self.train_dataset[int(i)] for i in batch_indices]
-                prompts = [item['prompt'] for item in batch]
-                
-                # Generate responses
-                responses, response_tensors = self.generate_rollouts(prompts)
-                
-                # Compute rewards
-                if self.args.reward_mode == 'sparse':
-                    # Sparse reward: single reward at the end
-                    rewards = []
-                    for prompt, response in zip(prompts, responses):
-                        reward = self.compute_reward(prompt, response)
-                        rewards.append(torch.tensor(reward))
-                    
-                elif self.args.reward_mode == 'dense':
-                    # Dense reward: token-level rewards
-                    rewards = []
-                    for prompt, response, response_tokens in zip(prompts, responses, response_tensors):
-                        token_rewards = self.compute_dense_rewards(
-                            prompt, response, response_tokens.cpu().tolist()
-                        )
-                        rewards.append(torch.tensor(token_rewards))
-                else:
-                    raise ValueError(f"Unknown reward mode: {self.args.reward_mode}")
-                
-                # Prepare query tensors (prompts as tensors)
-                query_tensors = []
-                for prompt in prompts:
-                    query_tensor = self.tokenizer.encode(
-                        self.config.data.prompt_template.format(prompt=prompt),
-                        return_tensors='pt'
-                    ).squeeze(0)
-                    query_tensors.append(query_tensor)
-                
-                # PPO step
-                try:
-                    stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
-                    
-                    # Log metrics
-                    if stats:
-                        self.training_history.append({
-                            'epoch': epoch,
-                            'batch': batch_idx // self.args.batch_size,
-                            'step': global_step,
-                            **stats
-                        })
-                        
-                        # Log to console periodically
-                        if global_step % self.args.logging_steps == 0:
-                            logger.info(f"Step {global_step}: " + 
-                                      ", ".join([f"{k}: {v:.4f}" for k, v in stats.items() if isinstance(v, float)]))
-                    
-                    global_step += 1
-                    
-                except Exception as e:
-                    logger.warning(f"PPO step failed: {e}")
-                    continue
-                
-                # Save checkpoint periodically
-                if global_step % self.config.ppo.save_steps == 0:
-                    checkpoint_path = self.checkpoint_dir / f"checkpoint_{global_step}"
-                    self.model.save_pretrained(checkpoint_path)
-                    logger.info(f"Saved checkpoint at step {global_step}")
-            
-            # End of epoch - save checkpoint
-            epoch_checkpoint_path = self.checkpoint_dir / f"epoch_{epoch + 1}"
-            self.model.save_pretrained(epoch_checkpoint_path)
-            logger.info(f"Saved epoch {epoch + 1} checkpoint")
-        
-        # Save final model
-        logger.info("Saving final model...")
-        self.model.save_pretrained(self.save_dir / "final_model")
-        
-        # Save training history
-        history_df = pd.DataFrame(self.training_history)
-        history_df.to_csv(self.save_dir / "training_history.csv", index=False)
-        
-        logger.info("=" * 80)
-        logger.info("PPO Training Completed")
-        logger.info("=" * 80)
+        # Training
+        ppo_trainer.train()
         
         return ppo_trainer
     

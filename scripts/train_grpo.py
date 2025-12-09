@@ -136,7 +136,6 @@ class GRPOModelTrainer:
         # Metrics storage
         self.training_history = []
         self.advantage_stats = []
-        self.setup_paths()
         
     def setup_paths(self):
         """Setup directory structure"""
@@ -217,7 +216,7 @@ class GRPOModelTrainer:
                 self.args.reward_model_path,
                 num_labels=1,
                 quantization_config=reward_bnb_config,
-                device_map="auto",
+                device_map={"":0},
                 trust_remote_code=self.config.base_model.trust_remote_code,
             )
         except Exception as e:
@@ -228,7 +227,7 @@ class GRPOModelTrainer:
                     self.args.model_name,
                     num_labels=1,
                     quantization_config=reward_bnb_config,  # ✅ FIXED: Use config
-                    device_map="auto",
+                    device_map={"":0},
                     trust_remote_code=self.config.base_model.trust_remote_code,
                 )
                 self.reward_model = PeftModel.from_pretrained(base_model, self.args.reward_model_path)
@@ -312,7 +311,7 @@ class GRPOModelTrainer:
             self.args.model_name,
             quantization_config=bnb_config if bnb_config else None,
             load_in_8bit=self.args.load_in_8bit if not bnb_config else False,
-            device_map="auto",
+            device_map={"":0},
             trust_remote_code=self.config.base_model.trust_remote_code,
             torch_dtype=torch.float16 if self.args.mixed_precision == "fp16" else torch.bfloat16 if self.args.mixed_precision == "bf16" else "auto",
         )
@@ -356,7 +355,7 @@ class GRPOModelTrainer:
             self.args.model_name,
             quantization_config=ref_bnb_config if ref_bnb_config else None,
             load_in_8bit=self.args.load_in_8bit if not ref_bnb_config else False,
-            device_map="auto",
+            device_map={"":0},
             trust_remote_code=self.config.base_model.trust_remote_code,
         )
         logger.info(f"✓ Loaded reference model with quantization: 4-bit={self.args.load_in_4bit}, 8-bit={self.args.load_in_8bit}")
@@ -399,7 +398,7 @@ class GRPOModelTrainer:
         input_ids = self.tokenizer.encode(
             prompt_text, 
             return_tensors='pt'
-        ).to(self.model_device)  # ✅ FIXED: Use tracked device
+        ).to(self.model_device) 
         
         for _ in range(group_size):
             # Generate response
@@ -790,7 +789,7 @@ class GRPOModelTrainer:
                     return_tensors='pt',
                     truncation=True,
                     max_length=self.args.max_length
-                ).to(self.model.device)
+                ).to(self.model_device)
                 
                 # Get loss
                 outputs = self.model(**inputs, labels=inputs['input_ids'])
@@ -841,7 +840,7 @@ class GRPOModelTrainer:
                 prompt_text = self.config.data.prompt_template.format(prompt=example['prompt'])
                 
                 # Tokenize prompt
-                prompt_ids = self.tokenizer.encode(prompt_text, return_tensors='pt').to(self.model.device)
+                prompt_ids = self.tokenizer.encode(prompt_text, return_tensors='pt').to(self.model_device)
                 
                 # Generate response with policy
                 policy_output = self.model.generate(
