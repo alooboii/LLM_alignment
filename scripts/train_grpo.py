@@ -662,7 +662,10 @@ class GRPOModelTrainer:
         logger.info(f"Learning rate: {self.args.learning_rate}")
         logger.info(f"Epochs: {self.args.epochs}")
         logger.info("=" * 80)
-        
+
+        if len(self.train_dataset) == 0:
+            raise RuntimeError("Training dataset is empty - please prepare data before running GRPO")
+
         global_step = 0
         
         for epoch in range(self.args.epochs):
@@ -1157,7 +1160,7 @@ def main():
     parser.add_argument('--mixed_precision', type=str, default='fp16')
 
     # LoRA
-    parser.add_argument('--use_lora', action='store_true', default=True)
+    parser.add_argument('--use_lora', action='store_true', default=False)
     parser.add_argument('--lora_r', type=int, default=8)
     parser.add_argument('--lora_alpha', type=int, default=16)
     parser.add_argument('--lora_dropout', type=float, default=0.05)
@@ -1173,10 +1176,11 @@ def main():
     args = parser.parse_args()
 
     
-    # IMPORTANT: Enable 4-bit quantization by default if no quantization specified
-    if not args.load_in_8bit and not args.load_in_4bit:
-        args.load_in_4bit = True
-        logger.info("✓ Enabled 4-bit quantization by default")
+    # Enforce 4-bit quantization and disable LoRA per updated guidance
+    args.load_in_4bit = True
+    args.load_in_8bit = False
+    args.use_lora = False
+    logger.info("✓ Enforcing 4-bit quantization with LoRA disabled")
     
     # Get config
     config = get_default_config()

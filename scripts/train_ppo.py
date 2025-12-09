@@ -1,5 +1,4 @@
-"""
-PPO (Proximal Policy Optimization) Training Script
+"""PPO (Proximal Policy Optimization) Training Script
 
 This script implements PPO for aligning language models with human preferences.
 PPO uses a reward model and value function to optimize the policy via RL.
@@ -18,7 +17,7 @@ Usage:
       --epochs 3 \
       --seed 42 \
       --save_dir ./checkpoints/ppo_sparse
-    
+
     # Dense reward PPO
     python train_ppo.py \
       --method PPO \
@@ -217,13 +216,19 @@ class PPOModelTrainer:
     def load_reward_model(self):
         """Load frozen reward model"""
         logger.info(f"Loading reward model from: {self.args.reward_model_path}")
-        
+
+        reward_bnb_config = create_quantization_config(
+            load_in_4bit=True,
+            load_in_8bit=False,
+            mixed_precision=self.args.mixed_precision
+        )
+
         try:
             # Try loading as a full model first
             self.reward_model = AutoModelForSequenceClassification.from_pretrained(
                 self.args.reward_model_path,
                 num_labels=1,
-                load_in_4bit=True,  # FIXED: Use 4-bit instead of 8-bit,
+                quantization_config=reward_bnb_config,
                 device_map="auto",
                 trust_remote_code=self.config.base_model.trust_remote_code,
             )
@@ -234,7 +239,7 @@ class PPOModelTrainer:
                 base_model = AutoModelForSequenceClassification.from_pretrained(
                     self.args.model_name,
                     num_labels=1,
-                    load_in_4bit=True,  # FIXED: Use 4-bit instead of 8-bit,
+                    quantization_config=reward_bnb_config,
                     device_map="auto",
                     trust_remote_code=self.config.base_model.trust_remote_code,
                 )
@@ -290,6 +295,7 @@ class PPOModelTrainer:
             formatted = []
             for ex in examples:
                 formatted.append({
+                    'query': ex['prompt'],
                     'prompt': ex['prompt'],
                     'response_w': ex['response_w'],  # Keep for reference
                     'response_l': ex['response_l'],  # Keep for reference
@@ -302,19 +308,38 @@ class PPOModelTrainer:
         # Convert to HuggingFace Dataset
         self.train_dataset = HFDataset.from_list(train_formatted)
         self.val_dataset = HFDataset.from_list(val_formatted)
-        
+
+        def tokenize_batch(batch):
+            tokens = self.tokenizer(
+                batch['prompt'],
+                truncation=True,
+                max_length=self.args.max_length,
+                padding='max_length'
+            )
+            tokens['query'] = batch['query']
+            return tokens
+
+        self.train_dataset = self.train_dataset.map(tokenize_batch, batched=True)
+        self.val_dataset = self.val_dataset.map(tokenize_batch, batched=True)
+
         logger.info(f"Datasets formatted for PPO")
         logger.info(f"Train size: {len(self.train_dataset)}, Val size: {len(self.val_dataset)}")
     
     def setup_models(self):
         """Initialize policy model with value head and reference model"""
         logger.info(f"Loading base model: {self.args.model_name}")
-        
+
+        bnb_config = create_quantization_config(
+            load_in_4bit=self.args.load_in_4bit,
+            load_in_8bit=self.args.load_in_8bit,
+            mixed_precision=self.args.mixed_precision
+        )
+
         # Load base model
         base_model = AutoModelForCausalLM.from_pretrained(
             self.args.model_name,
-            load_in_8bit=self.args.load_in_8bit,
-            load_in_4bit=self.args.load_in_4bit,
+            quantization_config=bnb_config if bnb_config else None,
+            load_in_8bit=self.args.load_in_8bit if not bnb_config else False,
             device_map="auto",
             trust_remote_code=self.config.base_model.trust_remote_code,
             torch_dtype=torch.float16 if self.args.mixed_precision == "fp16" else torch.bfloat16 if self.args.mixed_precision == "bf16" else "auto",
@@ -437,18 +462,20 @@ class PPOModelTrainer:
     def train(self):
         """Main PPO training loop"""
         logger.info("Starting PPO training...")
-        
+
         # Set seed
         set_seed(self.args.seed)
-        
+
+        if len(self.train_dataset) == 0:
+            raise RuntimeError("Training dataset is empty - please prepare data before running PPO")
+
         # Setup PPO config
         ppo_config = PPOConfig(
-            # Basic training params
+            model_name=self.args.model_name,
             learning_rate=self.args.learning_rate,
-            per_device_train_batch_size=self.args.batch_size,
+            batch_size=self.args.batch_size,
+            mini_batch_size=self.args.mini_batch_size,
             gradient_accumulation_steps=self.args.gradient_accumulation_steps,
-            
-            # PPO-specific params (MATCHING TRL's actual names!)
             num_ppo_epochs=self.args.num_ppo_epochs,
             whiten_rewards=self.args.whiten_rewards,
             kl_coef=self.args.kl_coef,
@@ -457,42 +484,59 @@ class PPOModelTrainer:
             vf_coef=self.args.vf_coef,
             gamma=self.args.gamma,
             lam=self.args.lam,
-            
-            # Generation config
-            response_length=self.args.max_new_tokens,
-            temperature=self.args.temperature,
-            
-            # Other required params
-            total_episodes=len(self.train_dataset) * self.args.epochs,
-            num_mini_batches=self.args.batch_size // self.args.mini_batch_size,
-            
-            # Paths
-            output_dir=str(self.save_dir),
-            logging_steps=self.args.logging_steps,
-            
-            # Seed
             seed=self.args.seed,
         )
-        
-        # ✅ CRITICAL: TRL expects model WITHOUT value head already attached
-        # We added value head with AutoModelForCausalLMWithValueHead
-        # Need to extract the base model
-        base_model = self.model.pretrained_model  # Get base model without value head
-        
-        # Create PPO trainer with CORRECT parameters
+
+        # Create PPO trainer
         ppo_trainer = PPOTrainer(
-            args=ppo_config,  # ✅ NOT 'config'
-            processing_class=self.tokenizer,  # ✅ NOT 'tokenizer'
-            model=base_model,  # ✅ Base model without value head
+            config=ppo_config,
+            model=self.model,
             ref_model=self.ref_model,
-            reward_model=self.reward_model,
-            train_dataset=self.train_dataset,
-            value_model=self.model.v_head,  # ✅ Separate value head
+            tokenizer=self.tokenizer,
+            dataset=self.train_dataset
         )
-        
-        # Training
-        ppo_trainer.train()
-        
+
+        gen_kwargs = dict(
+            max_new_tokens=self.args.max_new_tokens,
+            temperature=self.args.temperature,
+            top_k=self.args.top_k,
+            top_p=self.args.top_p,
+            do_sample=self.args.do_sample,
+            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+        )
+
+        for epoch in range(self.args.epochs):
+            logger.info(f"Epoch {epoch + 1}/{self.args.epochs}")
+            for batch in tqdm(ppo_trainer.dataloader, desc=f"PPO Epoch {epoch + 1}"):
+                query_tensors = batch["input_ids"].to(self.model.device)
+                attention_mask = batch["attention_mask"].to(self.model.device)
+
+                response_tensors = []
+                for q_tensor, a_tensor in zip(query_tensors, attention_mask):
+                    generated = ppo_trainer.generate(
+                        q_tensor.unsqueeze(0),
+                        attention_mask=a_tensor.unsqueeze(0),
+                        **gen_kwargs
+                    )
+                    # Remove prompt from generated output
+                    response = generated[:, q_tensor.shape[-1]:]
+                    response_tensors.append(response.squeeze(0))
+
+                decoded_responses = self.tokenizer.batch_decode(
+                    [resp for resp in response_tensors], skip_special_tokens=True
+                )
+
+                rewards = [
+                    self.compute_reward(query, response)
+                    for query, response in zip(batch["query"], decoded_responses)
+                ]
+
+                stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
+                ppo_trainer.log_stats(stats, batch, rewards)
+
+        ppo_trainer.save_pretrained(self.save_dir / "final_model")
+
         return ppo_trainer
     
     def compute_perplexity(self):
@@ -782,10 +826,9 @@ class PPOModelTrainer:
             f"- Mini Batch Size: {self.args.mini_batch_size}",
             f"- Learning Rate: {self.args.learning_rate}",
             f"- Epochs: {self.args.epochs}",
-            f"- KL Coefficient: {self.args.init_kl_coef}",
-            f"- Target KL: {self.args.target_kl}",
-            f"- Clip Range: {self.args.clip_range}",
-            f"- PPO Epochs: {self.args.ppo_epochs}",
+            f"- KL Coefficient: {self.args.kl_coef}",
+            f"- Clip Range: {self.args.cliprange}",
+            f"- PPO Epochs: {self.args.num_ppo_epochs}",
             f"- Seed: {self.args.seed}",
             "",
             "## Final Training Metrics",
@@ -932,7 +975,7 @@ def main():
     parser.add_argument('--mixed_precision', type=str, default='fp16')
 
     # LoRA
-    parser.add_argument('--use_lora', action='store_true', default=True)
+    parser.add_argument('--use_lora', action='store_true', default=False)
     parser.add_argument('--lora_r', type=int, default=8)
     parser.add_argument('--lora_alpha', type=int, default=16)
     parser.add_argument('--lora_dropout', type=float, default=0.05)
@@ -946,6 +989,12 @@ def main():
     parser.add_argument('--save_steps', type=int, default=500)
 
     args = parser.parse_args()
+
+    # Enforce 4-bit quantization and disable LoRA per updated guidance
+    args.load_in_4bit = True
+    args.load_in_8bit = False
+    args.use_lora = False
+    logger.info("✓ Enforcing 4-bit quantization with LoRA disabled")
 
     # Get config
     config = get_default_config()
