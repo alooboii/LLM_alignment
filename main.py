@@ -277,6 +277,85 @@ class ExperimentOrchestrator:
         if self.args.train_dpo or self.args.full_pipeline:
             logger.info("\n--- Training DPO ---")
             for seed in self.seeds:
+                dpo_model_path = self.checkpoints_dir / f"dpo_seed_{seed}" / "final_model"
+                
+                # Check if DPO model already exists
+                if dpo_model_path.exists() and not self.args.force_retrain:
+                    logger.info("=" * 80)
+                    logger.info(f"✓ EXISTING DPO MODEL FOUND (seed={seed})!")
+                    logger.info("=" * 80)
+                    logger.info(f"Path: {dpo_model_path}")
+                    logger.info("Validating model...")
+                    logger.info("=" * 80 + "\n")
+                    
+                    # Verify model is loadable
+                    try:
+                        from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+                        from peft import PeftModel
+                        import torch
+                        
+                        # Create quantization config
+                        bnb_config = BitsAndBytesConfig(
+                            load_in_4bit=True,
+                            bnb_4bit_quant_type="nf4",
+                            bnb_4bit_compute_dtype=torch.float16,
+                            bnb_4bit_use_double_quant=True,
+                        )
+                        
+                        # Check if it's a LoRA adapter or full model
+                        adapter_config_path = dpo_model_path / "adapter_config.safetensors"
+                        
+                        if adapter_config_path.exists():
+                            # Load base model + adapter
+                            with open(adapter_config_path, 'r') as f:
+                                import json
+                                adapter_config = json.load(f)
+                            base_model_name = adapter_config.get('base_model_name_or_path', 
+                                                                  'HuggingFaceTB/SmolLM2-135M-Instruct')
+                            
+                            test_model = AutoModelForCausalLM.from_pretrained(
+                                base_model_name,
+                                quantization_config=bnb_config,
+                                torch_dtype=torch.float16,
+                                device_map="auto",
+                                trust_remote_code=True,
+                            )
+                            test_model = PeftModel.from_pretrained(test_model, str(dpo_model_path))
+                        else:
+                            # Load full model
+                            test_model = AutoModelForCausalLM.from_pretrained(
+                                str(dpo_model_path),
+                                quantization_config=bnb_config,
+                                torch_dtype=torch.float16,
+                                device_map="auto",
+                                trust_remote_code=True,
+                            )
+                        
+                        del test_model
+                        logger.info("✓ Model validation successful")
+                        logger.info(f"Skipping DPO training for seed {seed}")
+                        logger.info("(Use --force_retrain to retrain anyway)")
+                        logger.info("=" * 80 + "\n")
+                        
+                        # Mark as successful
+                        self.results['experiments_run'].append({
+                            'name': f'dpo_seed_{seed}',
+                            'stage': 'alignment_dpo',
+                            'status': 'skipped_existing',
+                            'path': str(dpo_model_path)
+                        })
+                        continue  # Skip to next seed
+                        
+                    except Exception as e:
+                        logger.error(f"✗ Model validation failed: {e}")
+                        logger.error("Model exists but is corrupted. Will retrain...\n")
+                        # Delete corrupted model and continue to training
+                        import shutil
+                        shutil.rmtree(self.checkpoints_dir / f"dpo_seed_{seed}", ignore_errors=True)
+                
+                # Model doesn't exist or was corrupted or force_retrain, train it
+                logger.info(f"Training DPO model for seed {seed}...\n")
+                
                 cmd = [
                     sys.executable,
                     str(self.scripts_dir / "train_dpo.py"),
