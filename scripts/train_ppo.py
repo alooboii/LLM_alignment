@@ -481,8 +481,7 @@ class PPOModelTrainer:
             ref_model=self.ref_model,
             reward_model=self.reward_model,
             train_dataset=self.train_dataset,
-            value_model = self.base_modelodel
-            # ❌ NO value_model parameter!
+            value_model = self.base_model
         )
         
         # Training loop
