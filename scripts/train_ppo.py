@@ -461,10 +461,6 @@ class PPOModelTrainer:
             vf_coef=self.args.vf_coef,
             gamma=self.args.gamma,
             lam=self.args.lam,
-            
-            # Logging
-            log_with="tensorboard",
-            project_kwargs={"logging_dir": str(self.logs_dir)},
             seed=self.args.seed,
         )
         
