@@ -265,7 +265,6 @@ class PPOModelTrainer:
         train_path = data_dir / "train.jsonl"
         val_path = data_dir / "val.jsonl"
         
-        # Check if files exist
         if not train_path.exists():
             raise FileNotFoundError(
                 f"Training data not found at {train_path}. "
@@ -285,25 +284,38 @@ class PPOModelTrainer:
         
         logger.info(f"Loaded {len(train_data)} train, {len(val_data)} val examples")
         
-        # Format for PPO (just need prompts)
-        def format_for_ppo(examples):
+        # ✅ Format and TOKENIZE for PPO
+        def format_and_tokenize_for_ppo(examples):
             formatted = []
             for ex in examples:
+                # Format prompt with template
+                prompt_text = self.config.data.prompt_template.format(prompt=ex['prompt'])
+                
+                # ✅ TOKENIZE the prompt
+                tokenized = self.tokenizer(
+                    prompt_text,
+                    truncation=True,
+                    max_length=self.args.max_length,
+                    return_tensors=None,  # Return lists, not tensors
+                )
+                
+                # Add to formatted list with input_ids
                 formatted.append({
-                    'prompt': ex['prompt'],
-                    'response_w': ex['response_w'],  # Keep for reference
-                    'response_l': ex['response_l'],  # Keep for reference
+                    'input_ids': tokenized['input_ids'],
+                    'attention_mask': tokenized['attention_mask'],
+                    # Keep original data for reference (optional)
+                    'query': ex['prompt'],
                 })
             return formatted
         
-        train_formatted = format_for_ppo(train_data)
-        val_formatted = format_for_ppo(val_data)
+        train_formatted = format_and_tokenize_for_ppo(train_data)
+        val_formatted = format_and_tokenize_for_ppo(val_data)
         
         # Convert to HuggingFace Dataset
         self.train_dataset = HFDataset.from_list(train_formatted)
         self.val_dataset = HFDataset.from_list(val_formatted)
         
-        logger.info(f"Datasets formatted for PPO")
+        logger.info(f"Datasets tokenized and formatted for PPO")
         logger.info(f"Train size: {len(self.train_dataset)}, Val size: {len(self.val_dataset)}")
     
     def setup_models(self):
