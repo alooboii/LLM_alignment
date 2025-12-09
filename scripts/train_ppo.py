@@ -1,35 +1,21 @@
 """
-PPO (Proximal Policy Optimization) Training Script
+Custom PPO (Proximal Policy Optimization) Implementation
 
-This script implements PPO for aligning language models with human preferences.
-PPO uses a reward model and value function to optimize the policy via RL.
+This script implements PPO from scratch for aligning language models with human preferences.
+NO TRL dependencies - pure PyTorch implementation.
 
 Supports both sparse rewards (final response only) and dense rewards (token-level).
 
 Usage:
     # Sparse reward PPO
-    python train_ppo.py \
-      --method PPO \
+    python train_ppo_custom.py \
       --reward_model_path ./models/reward_model/final_model \
       --reward_mode sparse \
       --batch_size 8 \
-      --lr 1e-5 \
+      --learning_rate 1e-5 \
       --kl_coef 0.05 \
       --epochs 3 \
-      --seed 42 \
-      --save_dir ./checkpoints/ppo_sparse
-    
-    # Dense reward PPO
-    python train_ppo.py \
-      --method PPO \
-      --reward_model_path ./models/reward_model/final_model \
-      --reward_mode dense \
-      --batch_size 8 \
-      --lr 1e-5 \
-      --kl_coef 0.05 \
-      --epochs 3 \
-      --seed 42 \
-      --save_dir ./checkpoints/ppo_dense
+      --seed 42
 
 Reference:
     Schulman et al. (2017) - Proximal Policy Optimization Algorithms
@@ -39,12 +25,11 @@ import os
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
-from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
 from datetime import datetime
-import copy
-from pathlib import Path
 import sys
+
 PROJECT_ROOT = Path("/kaggle/working/LLM_Alignment")
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -53,22 +38,17 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-import seaborn as sns
 
-# Transformers and HuggingFace
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
     AutoModelForSequenceClassification,
     set_seed,
-    GenerationConfig
-,
     BitsAndBytesConfig
 )
-from datasets import load_dataset, Dataset as HFDataset
 from peft import (
     LoraConfig,
     get_peft_model,
@@ -77,15 +57,6 @@ from peft import (
     PeftModel
 )
 
-# TRL for PPO
-from trl import (
-    PPOTrainer,
-    PPOConfig,
-    AutoModelForCausalLMWithValueHead,
-    create_reference_model
-)
-
-# Import config
 from config.default_config import get_default_config
 
 # Setup logging
@@ -95,41 +66,47 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 def create_quantization_config(load_in_4bit=True, load_in_8bit=False, mixed_precision='fp16'):
-    """
-    Create BitsAndBytesConfig for optimal 4-bit quantization
-    
-    Args:
-        load_in_4bit: Whether to use 4-bit quantization
-        load_in_8bit: Whether to use 8-bit quantization
-        mixed_precision: Mixed precision setting ('fp16' or 'bf16')
-    
-    Returns:
-        BitsAndBytesConfig or None
-    """
+    """Create BitsAndBytesConfig for 4-bit quantization"""
     if load_in_4bit:
-        import torch
-        from transformers import BitsAndBytesConfig
-        
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",  # Normal Float 4-bit
+            bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.float16 if mixed_precision == "fp16" else torch.bfloat16,
-            bnb_4bit_use_double_quant=True,  # Nested quantization
+            bnb_4bit_use_double_quant=True,
         )
-        logger.info("✓ Created 4-bit quantization config (NF4 + double quantization)")
+        logger.info("✓ Created 4-bit quantization config (NF4)")
         return bnb_config
     elif load_in_8bit:
         logger.info("✓ Using 8-bit quantization")
         return None
     else:
-        logger.info("✓ No quantization (full precision)")
+        logger.info("✓ No quantization")
         return None
 
 
+class ValueHead(nn.Module):
+    """Simple value head for PPO"""
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        self.value_head = nn.Linear(hidden_size, 1, bias=False)
+        # Initialize with small weights
+        self.value_head.weight.data.normal_(mean=0.0, std=0.01)
+    
+    def forward(self, hidden_states):
+        """
+        Args:
+            hidden_states: [batch_size, seq_len, hidden_size]
+        Returns:
+            values: [batch_size, seq_len]
+        """
+        values = self.value_head(hidden_states).squeeze(-1)
+        return values
 
-class PPOModelTrainer:
-    """Main trainer class for PPO alignment"""
+
+class CustomPPOTrainer:
+    """Custom PPO implementation from scratch"""
     
     def __init__(self, args, config):
         self.args = args
@@ -141,25 +118,26 @@ class PPOModelTrainer:
         
         # Initialize components
         self.tokenizer = None
-        self.model = None  # Policy model with value head
+        self.policy_model = None  # Policy model (language model)
+        self.value_head = None  # Value function head
         self.ref_model = None  # Frozen reference model
         self.reward_model = None  # Frozen reward model
-        self.train_dataset = None
-        self.val_dataset = None
+        self.optimizer = None
         
-        # Metrics storage
+        # Training data
+        self.train_data = []
+        self.val_data = []
+        
+        # Metrics
         self.training_history = []
-        self.reward_stats = []
-        self.kl_stats = []
         
     def setup_paths(self):
         """Setup directory structure"""
-        # Create save directory
         if self.args.save_dir:
             self.save_dir = Path(self.args.save_dir)
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_name = f"ppo_{self.args.reward_mode}_{self.args.seed}_{timestamp}"
+            run_name = f"ppo_custom_{self.args.reward_mode}_seed{self.args.seed}_{timestamp}"
             self.save_dir = Path(self.args.output_dir) / run_name
         
         self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -168,30 +146,18 @@ class PPOModelTrainer:
         self.checkpoint_dir = self.save_dir / "checkpoints"
         self.logs_dir = self.save_dir / "logs"
         self.plots_dir = self.save_dir / "plots"
-        self.samples_dir = self.save_dir / "samples"
         
-        for d in [self.checkpoint_dir, self.logs_dir, self.plots_dir, self.samples_dir]:
+        for d in [self.checkpoint_dir, self.logs_dir, self.plots_dir]:
             d.mkdir(parents=True, exist_ok=True)
         
         logger.info(f"Save directory: {self.save_dir}")
     
     def save_config(self):
-        """Save arguments and config"""
-        # Save args
+        """Save configuration"""
         args_path = self.save_dir / "args.json"
         with open(args_path, 'w') as f:
             json.dump(vars(self.args), f, indent=2)
         logger.info(f"Saved args to {args_path}")
-
-        # Save config
-        config_path = self.save_dir / "config.json"
-        config_dict = {
-            'data': vars(self.config.data) if hasattr(self.config.data, '__dict__') else {},
-            'base_model': vars(self.config.base_model) if hasattr(self.config.base_model, '__dict__') else {},
-        }
-        with open(config_path, 'w') as f:
-            json.dump(config_dict, f, indent=2, default=str)
-        logger.info(f"Saved config to {config_path}")
     
     def setup_tokenizer(self):
         """Initialize tokenizer"""
@@ -202,785 +168,704 @@ class PPOModelTrainer:
             trust_remote_code=self.config.base_model.trust_remote_code,
         )
         
-        # Add padding token if missing
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-            logger.info(f"Set pad_token to eos_token: {self.tokenizer.eos_token}")
+            logger.info(f"Set pad_token to eos_token")
         
-        # Set padding side
         self.tokenizer.padding_side = "left"
-        
-        # Save tokenizer
         self.tokenizer.save_pretrained(self.save_dir / "tokenizer")
-        logger.info(f"Tokenizer saved")
+        logger.info("✓ Tokenizer ready")
     
     def load_reward_model(self):
         """Load frozen reward model"""
         logger.info(f"Loading reward model from: {self.args.reward_model_path}")
         
         try:
-            # Try loading as a full model first
+            # Try loading as full model
             self.reward_model = AutoModelForSequenceClassification.from_pretrained(
                 self.args.reward_model_path,
                 num_labels=1,
-                load_in_4bit=True,  # FIXED: Use 4-bit instead of 8-bit,
+                load_in_4bit=True,
                 device_map="auto",
                 trust_remote_code=self.config.base_model.trust_remote_code,
             )
-        except Exception as e:
-            logger.warning(f"Failed to load as full model: {e}")
+        except:
             # Try loading as adapter
-            try:
-                base_model = AutoModelForSequenceClassification.from_pretrained(
-                    self.args.model_name,
-                    num_labels=1,
-                    load_in_4bit=True,  # FIXED: Use 4-bit instead of 8-bit,
-                    device_map="auto",
-                    trust_remote_code=self.config.base_model.trust_remote_code,
-                )
-                self.reward_model = PeftModel.from_pretrained(base_model, self.args.reward_model_path)
-            except Exception as e2:
-                logger.error(f"Failed to load reward model: {e2}")
-                raise
+            base_model = AutoModelForSequenceClassification.from_pretrained(
+                self.args.model_name,
+                num_labels=1,
+                load_in_4bit=True,
+                device_map="auto",
+                trust_remote_code=self.config.base_model.trust_remote_code,
+            )
+            self.reward_model = PeftModel.from_pretrained(base_model, self.args.reward_model_path)
         
-        # # CRITICAL FIX: Disable gradient checkpointing for quantized reward model
-        # if hasattr(self.reward_model, 'gradient_checkpointing_disable'):
-        #     self.reward_model.gradient_checkpointing_disable()
-        #     logger.info("✓ Disabled gradient checkpointing for reward model")
-        
-        # Freeze reward model
+        # Freeze
         for param in self.reward_model.parameters():
             param.requires_grad = False
-        
         self.reward_model.eval()
-        logger.info("Reward model loaded and frozen")
+        
+        self.reward_device = next(self.reward_model.parameters()).device
+        logger.info(f"✓ Reward model loaded on {self.reward_device}")
     
     def load_datasets(self):
-        """Load and prepare datasets"""
+        """Load training data"""
         logger.info("Loading datasets...")
         
         data_dir = Path(self.args.data_dir)
-        
-        # Load processed data
         train_path = data_dir / "train.jsonl"
         val_path = data_dir / "val.jsonl"
         
-        # Check if files exist
         if not train_path.exists():
-            raise FileNotFoundError(
-                f"Training data not found at {train_path}. "
-                "Please run prepare_data.py first."
-            )
+            raise FileNotFoundError(f"Training data not found at {train_path}")
         
-        # Load data
-        train_data = []
+        # Load JSONL
         with open(train_path, 'r') as f:
             for line in f:
-                train_data.append(json.loads(line))
+                self.train_data.append(json.loads(line))
         
-        val_data = []
         with open(val_path, 'r') as f:
             for line in f:
-                val_data.append(json.loads(line))
+                self.val_data.append(json.loads(line))
         
-        logger.info(f"Loaded {len(train_data)} train, {len(val_data)} val examples")
-        
-        # Format and tokenize for PPO
-        def format_and_tokenize_for_ppo(examples):
-            formatted = []
-            for ex in examples:
-                # Format prompt with template
-                prompt_text = self.config.data.prompt_template.format(prompt=ex['prompt'])
-                
-                # Tokenize the prompt
-                tokenized = self.tokenizer(
-                    prompt_text,
-                    truncation=True,
-                    max_length=self.args.max_length - self.args.max_new_tokens,
-                    return_tensors=None,
-                )
-                
-                # ✅ ONLY include tensor-compatible fields
-                formatted.append({
-                    'input_ids': tokenized['input_ids'],
-                    'attention_mask': tokenized['attention_mask'],
-                    # ✅ NO other fields (no 'query', no 'prompt', nothing else)
-                })
-            return formatted
-        
-        logger.info("Tokenizing datasets...")
-        train_formatted = format_and_tokenize_for_ppo(train_data)
-        val_formatted = format_and_tokenize_for_ppo(val_data)
-        
-        # Convert to HuggingFace Dataset
-        self.train_dataset = HFDataset.from_list(train_formatted)
-        self.val_dataset = HFDataset.from_list(val_formatted)
-        
-        logger.info(f"✓ Datasets tokenized and formatted for PPO")
-        logger.info(f"Train size: {len(self.train_dataset)}, Val size: {len(self.val_dataset)}")
-        logger.info(f"Sample input_ids length: {len(self.train_dataset[0]['input_ids'])}")
+        logger.info(f"Loaded {len(self.train_data)} train, {len(self.val_data)} val examples")
     
     def setup_models(self):
-        """Initialize policy model and reference model"""
-        logger.info(f"Loading base model: {self.args.model_name}")
+        """Initialize policy, value head, and reference models"""
+        logger.info(f"Loading policy model: {self.args.model_name}")
         
-        # Create quantization config
         bnb_config = create_quantization_config(
             self.args.load_in_4bit,
             self.args.load_in_8bit,
             self.args.mixed_precision
         )
         
-        # Load base model
-        self.base_model = AutoModelForCausalLM.from_pretrained(
+        # Load policy model
+        self.policy_model = AutoModelForCausalLM.from_pretrained(
             self.args.model_name,
             quantization_config=bnb_config if bnb_config else None,
-            load_in_8bit=self.args.load_in_8bit if not bnb_config else False,
-            device_map={"":0},
+            device_map={"": 0},
             trust_remote_code=self.config.base_model.trust_remote_code,
             torch_dtype=torch.float16 if self.args.mixed_precision == "fp16" else torch.bfloat16,
         )
         
-        # Prepare for training if using quantization
-        if self.args.load_in_8bit or self.args.load_in_4bit:
-            self.base_model = prepare_model_for_kbit_training(self.base_model)
-            logger.info("✓ Prepared model for quantized training")
+        if self.args.load_in_4bit or self.args.load_in_8bit:
+            self.policy_model = prepare_model_for_kbit_training(self.policy_model)
         
-        # ✅ CRITICAL FIX: Enable gradient checkpointing
-        # TRL will try to disable it during generation, so it MUST exist
-        if hasattr(self.base_model, 'gradient_checkpointing_enable'):
-            self.base_model.gradient_checkpointing_enable()
-            logger.info("✓ Enabled gradient checkpointing (TRL will manage it)")
+        # Apply LoRA if requested
+        if self.args.use_lora:
+            lora_config = LoraConfig(
+                r=self.args.lora_r,
+                lora_alpha=self.args.lora_alpha,
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                lora_dropout=self.args.lora_dropout,
+                bias="none",
+                task_type=TaskType.CAUSAL_LM,
+            )
+            self.policy_model = get_peft_model(self.policy_model, lora_config)
+            logger.info(f"✓ Applied LoRA (r={self.args.lora_r})")
         
-        # Track device
-        self.model_device = next(self.base_model.parameters()).device
-        logger.info(f"✓ Base model on device: {self.model_device}")
+        self.policy_device = next(self.policy_model.parameters()).device
+        logger.info(f"✓ Policy model on {self.policy_device}")
         
-        # Print trainable parameters
-        trainable_params = sum(p.numel() for p in self.base_model.parameters() if p.requires_grad)
-        all_params = sum(p.numel() for p in self.base_model.parameters())
-        trainable_percent = 100 * trainable_params / all_params if all_params > 0 else 0
-        logger.info(f"✓ Trainable params: {trainable_params:,} / {all_params:,} ({trainable_percent:.2f}%)")
+        # Create value head
+        hidden_size = self.policy_model.config.hidden_size
+        self.value_head = ValueHead(hidden_size).to(self.policy_device)
+        logger.info(f"✓ Value head created (hidden_size={hidden_size})")
         
-        # Create frozen reference model (no gradient checkpointing needed)
-        logger.info("Creating frozen reference model...")
+        # Load reference model (frozen copy)
+        logger.info("Loading reference model...")
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             self.args.model_name,
             quantization_config=bnb_config if bnb_config else None,
-            load_in_8bit=self.args.load_in_8bit if not bnb_config else False,
-            device_map={"":0},
+            device_map={"": 0},
             trust_remote_code=self.config.base_model.trust_remote_code,
         )
         
-        # Freeze reference model
         for param in self.ref_model.parameters():
             param.requires_grad = False
         self.ref_model.eval()
         
         self.ref_device = next(self.ref_model.parameters()).device
-        logger.info(f"✓ Reference model on device: {self.ref_device}")
+        logger.info(f"✓ Reference model on {self.ref_device}")
         
-        logger.info("✓ Models loaded and configured successfully")
+        # Setup optimizer (only for policy + value head)
+        trainable_params = list(self.policy_model.parameters()) + list(self.value_head.parameters())
+        self.optimizer = torch.optim.AdamW(
+            trainable_params,
+            lr=self.args.learning_rate,
+            weight_decay=self.args.weight_decay
+        )
+        logger.info("✓ Optimizer ready")
     
     def compute_reward(self, prompt: str, response: str) -> float:
-        """Compute reward for a prompt-response pair"""
-        # Format text
+        """Compute reward for prompt-response pair"""
         text = self.config.data.prompt_template.format(prompt=prompt)
         text += self.config.data.response_template.format(response=response)
         
-        # Tokenize
         inputs = self.tokenizer(
             text,
             return_tensors='pt',
             truncation=True,
             max_length=self.args.max_length
-        ).to(self.reward_model.device)
+        ).to(self.reward_device)
         
-        # Get reward
         with torch.no_grad():
             outputs = self.reward_model(**inputs)
             reward = outputs.logits.squeeze().item()
         
         return reward
     
-    def compute_dense_rewards(self, prompt: str, response: str, response_tokens: List[int]) -> List[float]:
+    def generate_response(self, prompt: str) -> Tuple[str, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Compute token-level rewards for dense reward setup
+        Generate response for a prompt
         
-        Strategy: Compute reward at each prefix and use differences as token rewards
+        Returns:
+            response_text: Generated text
+            response_ids: Token IDs [seq_len]
+            log_probs: Log probabilities [seq_len]
+            values: Value estimates [seq_len]
         """
-        # Decode tokens to get intermediate responses
-        dense_rewards = []
+        # Format prompt
+        prompt_text = self.config.data.prompt_template.format(prompt=prompt)
         
-        # Start with just prompt (baseline)
-        prev_reward = 0.0
+        # Tokenize
+        prompt_ids = self.tokenizer.encode(prompt_text, return_tensors='pt').to(self.policy_device)
         
-        # Compute reward at each token
-        for i in range(1, len(response_tokens) + 1):
-            # Decode prefix
-            prefix = self.tokenizer.decode(response_tokens[:i], skip_special_tokens=True)
-            
-            # Compute reward for this prefix
-            reward = self.compute_reward(prompt, prefix)
-            
-            # Token reward is the difference
-            token_reward = reward - prev_reward
-            dense_rewards.append(token_reward)
-            
-            prev_reward = reward
+        # Generate with policy
+        self.policy_model.eval()
+        with torch.no_grad():
+            outputs = self.policy_model.generate(
+                prompt_ids,
+                max_new_tokens=self.args.max_new_tokens,
+                do_sample=True,
+                temperature=self.args.temperature,
+                top_k=self.args.top_k,
+                top_p=self.args.top_p,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+                output_scores=True,
+                return_dict_in_generate=True,
+            )
         
-        return dense_rewards
+        # Extract response tokens (remove prompt)
+        full_ids = outputs.sequences[0]  # [full_seq_len]
+        response_ids = full_ids[prompt_ids.shape[1]:]  # [response_len]
+        
+        # Decode response
+        response_text = self.tokenizer.decode(response_ids, skip_special_tokens=True)
+        
+        # Compute log probs and values for response tokens
+        with torch.no_grad():
+            # Get model outputs for full sequence
+            model_outputs = self.policy_model(input_ids=full_ids.unsqueeze(0), output_hidden_states=True)
+            logits = model_outputs.logits[0]  # [full_seq_len, vocab_size]
+            hidden_states = model_outputs.hidden_states[-1][0]  # [full_seq_len, hidden_size]
+            
+            # Compute log probs for response tokens
+            log_probs_all = F.log_softmax(logits, dim=-1)  # [full_seq_len, vocab_size]
+            
+            # Get log probs of actual tokens
+            response_log_probs = []
+            for i in range(len(response_ids)):
+                token_id = response_ids[i]
+                # Log prob is from the previous position's logits
+                pos = prompt_ids.shape[1] + i - 1
+                if pos >= 0:
+                    log_prob = log_probs_all[pos, token_id].item()
+                else:
+                    log_prob = 0.0
+                response_log_probs.append(log_prob)
+            
+            response_log_probs = torch.tensor(response_log_probs, device=self.policy_device)
+            
+            # Compute values for response positions
+            values = self.value_head(hidden_states)  # [full_seq_len]
+            response_values = values[prompt_ids.shape[1]:]  # [response_len]
+        
+        return response_text, response_ids, response_log_probs, response_values
     
-    def generate_rollouts(self, prompts: List[str]) -> Tuple[List[str], List[torch.Tensor], List[torch.Tensor]]:
-        """Generate responses for prompts"""
-        responses = []
-        response_tensors = []
+    def compute_advantages(self, rewards: torch.Tensor, values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute advantages using Generalized Advantage Estimation (GAE)
         
-        for prompt in prompts:
-            # Tokenize prompt
-            input_ids = self.tokenizer.encode(
-                self.config.data.prompt_template.format(prompt=prompt),
-                return_tensors='pt'
-            ).to(self.model.device)
+        Args:
+            rewards: [seq_len] - rewards for each token
+            values: [seq_len] - value estimates for each token
+        
+        Returns:
+            advantages: [seq_len]
+            returns: [seq_len] - target values for value function
+        """
+        gamma = self.args.gamma
+        lam = self.args.lam
+        
+        advantages = torch.zeros_like(rewards)
+        returns = torch.zeros_like(rewards)
+        
+        # GAE calculation (backward pass)
+        gae = 0
+        next_value = 0  # Terminal value
+        
+        for t in reversed(range(len(rewards))):
+            if t == len(rewards) - 1:
+                next_value = 0
+            else:
+                next_value = values[t + 1]
+            
+            # TD error
+            delta = rewards[t] + gamma * next_value - values[t]
+            
+            # GAE
+            gae = delta + gamma * lam * gae
+            advantages[t] = gae
+            
+            # Return (for value function target)
+            returns[t] = advantages[t] + values[t]
+        
+        return advantages, returns
+    
+    def compute_policy_loss(
+        self,
+        old_log_probs: torch.Tensor,
+        new_log_probs: torch.Tensor,
+        advantages: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute clipped PPO policy loss
+        
+        Args:
+            old_log_probs: [seq_len] - log probs from rollout
+            new_log_probs: [seq_len] - log probs from current policy
+            advantages: [seq_len] - advantage estimates
+        
+        Returns:
+            loss: scalar
+        """
+        # Compute ratio
+        ratio = torch.exp(new_log_probs - old_log_probs)
+        
+        # Clipped surrogate
+        clip_range = self.args.cliprange
+        clipped_ratio = torch.clamp(ratio, 1 - clip_range, 1 + clip_range)
+        
+        # Policy loss (negative because we want to maximize)
+        policy_loss1 = -advantages * ratio
+        policy_loss2 = -advantages * clipped_ratio
+        policy_loss = torch.max(policy_loss1, policy_loss2).mean()
+        
+        return policy_loss
+    
+    def compute_value_loss(
+        self,
+        values: torch.Tensor,
+        returns: torch.Tensor,
+        old_values: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute clipped value function loss
+        
+        Args:
+            values: [seq_len] - current value estimates
+            returns: [seq_len] - target returns
+            old_values: [seq_len] - value estimates from rollout
+        
+        Returns:
+            loss: scalar
+        """
+        # Unclipped loss
+        value_loss1 = F.mse_loss(values, returns, reduction='none')
+        
+        # Clipped loss
+        clip_range = self.args.cliprange_value
+        clipped_values = old_values + torch.clamp(
+            values - old_values,
+            -clip_range,
+            clip_range
+        )
+        value_loss2 = F.mse_loss(clipped_values, returns, reduction='none')
+        
+        # Take max (more conservative)
+        value_loss = torch.max(value_loss1, value_loss2).mean()
+        
+        return value_loss
+    
+    def ppo_update(
+        self,
+        prompt: str,
+        response_ids: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        old_values: torch.Tensor,
+        advantages: torch.Tensor,
+        returns: torch.Tensor
+    ) -> Dict[str, float]:
+        """
+        Perform PPO update on a single example
+        
+        Returns:
+            metrics: Dict of losses
+        """
+        # Format full input
+        prompt_text = self.config.data.prompt_template.format(prompt=prompt)
+        prompt_ids = self.tokenizer.encode(prompt_text, return_tensors='pt').to(self.policy_device)
+        full_ids = torch.cat([prompt_ids[0], response_ids])
+        
+        # Forward pass with current policy
+        self.policy_model.train()
+        model_outputs = self.policy_model(input_ids=full_ids.unsqueeze(0), output_hidden_states=True)
+        logits = model_outputs.logits[0]  # [seq_len, vocab_size]
+        hidden_states = model_outputs.hidden_states[-1][0]  # [seq_len, hidden_size]
+        
+        # Compute new log probs
+        log_probs_all = F.log_softmax(logits, dim=-1)
+        new_log_probs = []
+        for i in range(len(response_ids)):
+            token_id = response_ids[i]
+            pos = prompt_ids.shape[1] + i - 1
+            if pos >= 0:
+                log_prob = log_probs_all[pos, token_id]
+            else:
+                log_prob = torch.tensor(0.0, device=self.policy_device)
+            new_log_probs.append(log_prob)
+        new_log_probs = torch.stack(new_log_probs)
+        
+        # Compute new values
+        new_values = self.value_head(hidden_states)[prompt_ids.shape[1]:]
+        
+        # Compute losses
+        policy_loss = self.compute_policy_loss(old_log_probs, new_log_probs, advantages)
+        value_loss = self.compute_value_loss(new_values, returns, old_values)
+        
+        # KL penalty (policy vs reference)
+        with torch.no_grad():
+            ref_outputs = self.ref_model(input_ids=full_ids.unsqueeze(0))
+            ref_logits = ref_outputs.logits[0]
+            ref_log_probs_all = F.log_softmax(ref_logits, dim=-1)
+            
+            ref_log_probs = []
+            for i in range(len(response_ids)):
+                token_id = response_ids[i]
+                pos = prompt_ids.shape[1] + i - 1
+                if pos >= 0:
+                    log_prob = ref_log_probs_all[pos, token_id]
+                else:
+                    log_prob = torch.tensor(0.0, device=self.policy_device)
+                ref_log_probs.append(log_prob)
+            ref_log_probs = torch.stack(ref_log_probs)
+        
+        kl_div = (new_log_probs - ref_log_probs).mean()
+        
+        # Total loss
+        total_loss = policy_loss + self.args.vf_coef * value_loss + self.args.kl_coef * kl_div
+        
+        # Backward
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            list(self.policy_model.parameters()) + list(self.value_head.parameters()),
+            self.args.max_grad_norm
+        )
+        self.optimizer.step()
+        
+        return {
+            'policy_loss': policy_loss.item(),
+            'value_loss': value_loss.item(),
+            'kl_div': kl_div.item(),
+            'total_loss': total_loss.item(),
+        }
+    
+    def train_epoch(self, epoch: int):
+        """Train for one epoch"""
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Epoch {epoch + 1}/{self.args.epochs}")
+        logger.info(f"{'='*80}")
+        
+        # Shuffle training data
+        np.random.shuffle(self.train_data)
+        
+        epoch_metrics = {
+            'policy_loss': [],
+            'value_loss': [],
+            'kl_div': [],
+            'total_loss': [],
+            'reward': [],
+        }
+        
+        pbar = tqdm(self.train_data[:self.args.max_samples_per_epoch], desc=f"Epoch {epoch+1}")
+        
+        for example in pbar:
+            prompt = example['prompt']
             
             # Generate response
-            with torch.no_grad():
-                output = self.model.generate(
-                    input_ids,
-                    max_new_tokens=self.args.max_new_tokens,
-                    temperature=self.args.temperature,
-                    top_k=self.args.top_k,
-                    top_p=self.args.top_p,
-                    do_sample=self.args.do_sample,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
+            response_text, response_ids, log_probs, values = self.generate_response(prompt)
+            
+            # Compute reward
+            if self.args.reward_mode == 'sparse':
+                # Single reward at the end
+                reward_value = self.compute_reward(prompt, response_text)
+                rewards = torch.zeros(len(response_ids), device=self.policy_device)
+                rewards[-1] = reward_value  # Only last token gets reward
+            else:  # dense
+                # Token-level rewards
+                rewards = []
+                for i in range(len(response_ids)):
+                    partial_text = self.tokenizer.decode(response_ids[:i+1], skip_special_tokens=True)
+                    reward_value = self.compute_reward(prompt, partial_text)
+                    rewards.append(reward_value)
+                rewards = torch.tensor(rewards, device=self.policy_device)
+            
+            # Compute advantages
+            advantages, returns = self.compute_advantages(rewards, values)
+            
+            # Normalize advantages
+            if self.args.whiten_rewards:
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            
+            # PPO updates (multiple epochs on same data)
+            for _ in range(self.args.num_ppo_epochs):
+                metrics = self.ppo_update(
+                    prompt,
+                    response_ids,
+                    log_probs,
+                    values,
+                    advantages,
+                    returns
                 )
             
-            # Extract generated tokens (remove prompt)
-            response_tokens = output[0, input_ids.shape[1]:]
-            response_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)
+            # Log metrics
+            for key in epoch_metrics:
+                if key == 'reward':
+                    epoch_metrics[key].append(rewards.sum().item())
+                elif key in metrics:
+                    epoch_metrics[key].append(metrics[key])
             
-            responses.append(response_text)
-            response_tensors.append(response_tokens)
+            # Update progress bar
+            pbar.set_postfix({
+                'reward': f"{np.mean(epoch_metrics['reward']):.3f}",
+                'policy_loss': f"{np.mean(epoch_metrics['policy_loss']):.3f}",
+                'kl': f"{np.mean(epoch_metrics['kl_div']):.4f}",
+            })
         
-        return responses, response_tensors
+        # Compute epoch averages
+        epoch_avg = {k: np.mean(v) for k, v in epoch_metrics.items()}
+        epoch_avg['epoch'] = epoch
+        
+        self.training_history.append(epoch_avg)
+        
+        logger.info(f"\nEpoch {epoch+1} Summary:")
+        logger.info(f"  Reward: {epoch_avg['reward']:.4f}")
+        logger.info(f"  Policy Loss: {epoch_avg['policy_loss']:.4f}")
+        logger.info(f"  Value Loss: {epoch_avg['value_loss']:.4f}")
+        logger.info(f"  KL Divergence: {epoch_avg['kl_div']:.4f}")
+        
+        return epoch_avg
     
     def train(self):
-        """Main PPO training loop"""
-        logger.info("Starting PPO training...")
-        
-        # Set seed
-        set_seed(self.args.seed)
-        
-        # ✅ CORRECT: Setup PPO config with TRL's actual parameter names
-        ppo_config = PPOConfig(
-            # Basic training params
-            learning_rate=self.args.learning_rate,
-            batch_size=self.args.batch_size,
-            mini_batch_size=self.args.mini_batch_size,
-            gradient_accumulation_steps=self.args.gradient_accumulation_steps,
-            
-            # ✅ PPO-specific params (MATCHING TRL!)
-            num_ppo_epochs=self.args.num_ppo_epochs,      # ✅ NOT ppo_epochs
-            whiten_rewards=self.args.whiten_rewards,       # ✅ NEW parameter
-            kl_coef=self.args.kl_coef,                     # ✅ NOT init_kl_coef
-            cliprange=self.args.cliprange,                 # ✅ NOT clip_range
-            cliprange_value=self.args.cliprange_value,     # ✅ NOT clip_range_vf
-            vf_coef=self.args.vf_coef,
-            gamma=self.args.gamma,
-            report_to="none",
-            lam=self.args.lam,
-            # Seed
-            seed=self.args.seed,
-        )
-        
-        # CORRECT: PPOTrainer with correct parameter names
-        ppo_trainer = PPOTrainer(
-            args=ppo_config,                    # ✅ NOT 'config'
-            processing_class=self.tokenizer,    # ✅ NOT 'tokenizer'
-            model=self.base_model,                   # ✅ Complete model (with value head)
-            ref_model=self.ref_model,
-            reward_model=self.reward_model,
-            train_dataset=self.train_dataset,
-            value_model = self.base_model
-        )
-        
-        # Training loop
-        logger.info("=" * 80)
-        logger.info("PPO Training Started")
-        logger.info("=" * 80)
-        logger.info(f"Training examples: {len(self.train_dataset)}")
-        logger.info(f"Batch size: {self.args.batch_size}")
-        logger.info(f"Mini batch size: {self.args.mini_batch_size}")
-        logger.info(f"KL coefficient: {self.args.kl_coef}")
+        """Main training loop"""
+        logger.info("\n" + "="*80)
+        logger.info("Starting PPO Training")
+        logger.info("="*80)
+        logger.info(f"Training samples: {len(self.train_data)}")
+        logger.info(f"Max samples per epoch: {self.args.max_samples_per_epoch}")
         logger.info(f"Reward mode: {self.args.reward_mode}")
-        logger.info(f"Max new tokens: {self.args.max_new_tokens}")
-        logger.info("=" * 80)
+        logger.info(f"PPO epochs per sample: {self.args.num_ppo_epochs}")
+        logger.info(f"KL coefficient: {self.args.kl_coef}")
+        logger.info("="*80 + "\n")
         
-        # Use TRL's built-in training
-        ppo_trainer.train()
+        for epoch in range(self.args.epochs):
+            epoch_metrics = self.train_epoch(epoch)
+            
+            # Save checkpoint
+            if (epoch + 1) % self.args.save_every_n_epochs == 0:
+                self.save_checkpoint(epoch)
         
-        return ppo_trainer
+        # Save final model
+        self.save_final_model()
+        
+        # Save training history
+        self.save_training_history()
+        
+        # Plot curves
+        self.plot_training_curves()
+        
+        logger.info("\n" + "="*80)
+        logger.info("Training Complete!")
+        logger.info("="*80)
+        logger.info(f"Results saved to: {self.save_dir}")
     
-    def compute_perplexity(self):
-        """Compute perplexity on instruction-following data"""
-        logger.info("Computing perplexity on instruction-following data...")
+    def save_checkpoint(self, epoch: int):
+        """Save checkpoint"""
+        checkpoint_path = self.checkpoint_dir / f"epoch_{epoch+1}"
+        checkpoint_path.mkdir(exist_ok=True)
         
-        # Load instruction-following subset
-        instr_path = Path(self.args.data_dir) / "instr_following_subset.jsonl"
+        # Save policy model
+        if self.args.use_lora:
+            self.policy_model.save_pretrained(checkpoint_path / "policy_lora")
+        else:
+            self.policy_model.save_pretrained(checkpoint_path / "policy")
         
-        if not instr_path.exists():
-            logger.warning(f"Instruction-following subset not found at {instr_path}")
-            return None
+        # Save value head
+        torch.save(self.value_head.state_dict(), checkpoint_path / "value_head.pt")
         
-        # Load data
-        instr_data = []
-        with open(instr_path, 'r') as f:
-            for line in f:
-                instr_data.append(json.loads(line))
+        # Save optimizer
+        torch.save(self.optimizer.state_dict(), checkpoint_path / "optimizer.pt")
         
-        logger.info(f"Computing perplexity on {len(instr_data)} examples")
-        
-        self.model.eval()
-        
-        total_loss = 0.0
-        total_tokens = 0
-        
-        with torch.no_grad():
-            for item in tqdm(instr_data[:1000], desc="Computing perplexity"):
-                # Format text
-                text = self.config.data.prompt_template.format(prompt=item['prompt'])
-                text += self.config.data.response_template.format(response=item['response'])
-                
-                # Tokenize
-                inputs = self.tokenizer(
-                    text,
-                    return_tensors='pt',
-                    truncation=True,
-                    max_length=self.args.max_length
-                ).to(self.model.device)
-                
-                # Get loss from the base model (not value head)
-                outputs = self.model.pretrained_model(**inputs, labels=inputs['input_ids'])
-                loss = outputs.loss
-                
-                # Accumulate
-                num_tokens = inputs['input_ids'].shape[1]
-                total_loss += loss.item() * num_tokens
-                total_tokens += num_tokens
-        
-        # Compute perplexity
-        avg_loss = total_loss / total_tokens
-        perplexity = np.exp(avg_loss)
-        
-        logger.info(f"Perplexity: {perplexity:.4f}")
-        
-        # Save
-        perplexity_result = {
-            'perplexity': float(perplexity),
-            'avg_loss': float(avg_loss),
-            'num_examples': len(instr_data[:1000]),
-            'total_tokens': int(total_tokens)
-        }
-        
-        with open(self.save_dir / "perplexity.json", 'w') as f:
-            json.dump(perplexity_result, f, indent=2)
-        
-        return perplexity_result
+        logger.info(f"✓ Checkpoint saved to {checkpoint_path}")
     
-    def estimate_kl_divergence(self):
-        """Estimate KL divergence between trained policy and reference"""
-        logger.info("Estimating KL divergence vs reference model...")
+    def save_final_model(self):
+        """Save final trained model"""
+        final_path = self.save_dir / "final_model"
+        final_path.mkdir(exist_ok=True)
         
-        self.model.eval()
-        self.ref_model.eval()
+        if self.args.use_lora:
+            self.policy_model.save_pretrained(final_path / "policy_lora")
+        else:
+            self.policy_model.save_pretrained(final_path / "policy")
         
-        # Sample from validation set
-        num_samples = min(100, len(self.val_dataset))
-        sample_indices = np.random.choice(len(self.val_dataset), num_samples, replace=False)
+        torch.save(self.value_head.state_dict(), final_path / "value_head.pt")
         
-        kl_values = []
+        logger.info(f"✓ Final model saved to {final_path}")
+    
+    def save_training_history(self):
+        """Save training history"""
+        df = pd.DataFrame(self.training_history)
+        df.to_csv(self.logs_dir / "training_history.csv", index=False)
         
-        with torch.no_grad():
-            for idx in tqdm(sample_indices, desc="Computing KL"):
-                example = self.val_dataset[int(idx)]
-                
-                # Format prompt
-                prompt_text = self.config.data.prompt_template.format(prompt=example['prompt'])
-                
-                # Tokenize prompt
-                prompt_ids = self.tokenizer.encode(prompt_text, return_tensors='pt').to(self.model.device)
-                
-                # Generate response with policy
-                policy_output = self.model.generate(
-                    prompt_ids,
-                    max_new_tokens=self.args.max_new_tokens,
-                    do_sample=True,
-                    temperature=self.args.temperature,
-                    return_dict_in_generate=True,
-                    output_scores=True,
-                )
-                
-                response_ids = policy_output.sequences[0, prompt_ids.shape[1]:]
-                
-                # Get log probs from both models
-                full_ids = policy_output.sequences
-                
-                # Policy logits (full_ids already on correct device)
-                policy_outputs = self.model.pretrained_model(input_ids=full_ids)
-                policy_logits = policy_outputs.logits
-                
-                # Reference logits (move full_ids to ref_model device)
-                ref_full_ids = full_ids.to(self.ref_model.pretrained_model.device)
-                ref_outputs = self.ref_model.pretrained_model(input_ids=ref_full_ids)
-                ref_logits = ref_outputs.logits.to(policy_logits.device)
-                
-                # Compute log probs
-                policy_log_probs = torch.log_softmax(policy_logits, dim=-1)
-                ref_log_probs = torch.log_softmax(ref_logits, dim=-1)
-                
-                # Get token log probs
-                token_ids = full_ids[:, 1:]
-                
-                policy_token_log_probs = torch.gather(
-                    policy_log_probs[:, :-1, :],
-                    dim=2,
-                    index=token_ids.unsqueeze(-1)
-                ).squeeze(-1)
-                
-                ref_token_log_probs = torch.gather(
-                    ref_log_probs[:, :-1, :],
-                    dim=2,
-                    index=token_ids.unsqueeze(-1)
-                ).squeeze(-1)
-                
-                # Compute KL
-                kl_per_token = policy_token_log_probs - ref_token_log_probs
-                kl_mean = kl_per_token.mean().item()
-                kl_values.append(kl_mean)
+        with open(self.logs_dir / "training_history.json", 'w') as f:
+            json.dump(self.training_history, f, indent=2)
         
-        # Compute statistics
-        kl_stats = {
-            'kl_mean': float(np.mean(kl_values)),
-            'kl_std': float(np.std(kl_values)),
-            'kl_min': float(np.min(kl_values)),
-            'kl_max': float(np.max(kl_values)),
-            'kl_median': float(np.median(kl_values)),
-            'num_samples': num_samples
-        }
-        
-        logger.info(f"KL Divergence: {kl_stats['kl_mean']:.4f} ± {kl_stats['kl_std']:.4f}")
-        
-        # Save
-        with open(self.save_dir / "kl_divergence.json", 'w') as f:
-            json.dump(kl_stats, f, indent=2)
-        
-        return kl_stats
+        logger.info(f"✓ Training history saved")
     
     def plot_training_curves(self):
         """Plot training curves"""
-        logger.info("Generating training curve plots...")
-        
         if not self.training_history:
-            logger.warning("No training history found")
             return
         
         df = pd.DataFrame(self.training_history)
         
-        # Create plots
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle('PPO Training Curves', fontsize=16)
         
-        # Plot 1: Policy loss
-        if 'ppo/loss/policy' in df.columns:
-            axes[0, 0].plot(df['step'], df['ppo/loss/policy'], linewidth=2)
-            axes[0, 0].set_xlabel('Step')
-            axes[0, 0].set_ylabel('Policy Loss')
-            axes[0, 0].set_title('Policy Loss')
-            axes[0, 0].grid(True, alpha=0.3)
+        # Reward
+        axes[0, 0].plot(df['epoch'], df['reward'], 'g-', linewidth=2)
+        axes[0, 0].set_xlabel('Epoch')
+        axes[0, 0].set_ylabel('Average Reward')
+        axes[0, 0].set_title('Reward')
+        axes[0, 0].grid(True, alpha=0.3)
         
-        # Plot 2: Value loss
-        if 'ppo/loss/value' in df.columns:
-            axes[0, 1].plot(df['step'], df['ppo/loss/value'], linewidth=2, color='orange')
-            axes[0, 1].set_xlabel('Step')
-            axes[0, 1].set_ylabel('Value Loss')
-            axes[0, 1].set_title('Value Loss')
-            axes[0, 1].grid(True, alpha=0.3)
+        # Policy Loss
+        axes[0, 1].plot(df['epoch'], df['policy_loss'], 'b-', linewidth=2)
+        axes[0, 1].set_xlabel('Epoch')
+        axes[0, 1].set_ylabel('Policy Loss')
+        axes[0, 1].set_title('Policy Loss')
+        axes[0, 1].grid(True, alpha=0.3)
         
-        # Plot 3: Reward
-        if 'ppo/mean_scores' in df.columns:
-            axes[0, 2].plot(df['step'], df['ppo/mean_scores'], linewidth=2, color='green')
-            axes[0, 2].set_xlabel('Step')
-            axes[0, 2].set_ylabel('Mean Reward')
-            axes[0, 2].set_title('Mean Reward')
-            axes[0, 2].grid(True, alpha=0.3)
+        # Value Loss
+        axes[1, 0].plot(df['epoch'], df['value_loss'], 'orange', linewidth=2)
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Value Loss')
+        axes[1, 0].set_title('Value Loss')
+        axes[1, 0].grid(True, alpha=0.3)
         
-        # Plot 4: KL divergence
-        if 'objective/kl' in df.columns:
-            axes[1, 0].plot(df['step'], df['objective/kl'], linewidth=2, color='red')
-            axes[1, 0].set_xlabel('Step')
-            axes[1, 0].set_ylabel('KL Divergence')
-            axes[1, 0].set_title('KL Divergence')
-            axes[1, 0].grid(True, alpha=0.3)
-        
-        # Plot 5: Entropy
-        if 'objective/entropy' in df.columns:
-            axes[1, 1].plot(df['step'], df['objective/entropy'], linewidth=2, color='purple')
-            axes[1, 1].set_xlabel('Step')
-            axes[1, 1].set_ylabel('Entropy')
-            axes[1, 1].set_title('Policy Entropy')
-            axes[1, 1].grid(True, alpha=0.3)
-        
-        # Plot 6: Total loss
-        if 'ppo/loss/total' in df.columns:
-            axes[1, 2].plot(df['step'], df['ppo/loss/total'], linewidth=2, color='brown')
-            axes[1, 2].set_xlabel('Step')
-            axes[1, 2].set_ylabel('Total Loss')
-            axes[1, 2].set_title('Total Loss')
-            axes[1, 2].grid(True, alpha=0.3)
+        # KL Divergence
+        axes[1, 1].plot(df['epoch'], df['kl_div'], 'r-', linewidth=2)
+        axes[1, 1].set_xlabel('Epoch')
+        axes[1, 1].set_ylabel('KL Divergence')
+        axes[1, 1].set_title('KL Divergence (vs Reference)')
+        axes[1, 1].grid(True, alpha=0.3)
         
         plt.tight_layout()
         plt.savefig(self.plots_dir / "training_curves.png", dpi=300, bbox_inches='tight')
         plt.close()
         
-        logger.info(f"Training curves saved to {self.plots_dir / 'training_curves.png'}")
-    
-    def create_summary(self, perplexity_result: Optional[Dict], kl_stats: Optional[Dict]):
-        """Create summary report"""
-        logger.info("Creating summary report...")
-        
-        # Compute final metrics from training history
-        final_metrics = {}
-        if self.training_history:
-            df = pd.DataFrame(self.training_history)
-            for col in df.columns:
-                if col not in ['epoch', 'batch', 'step']:
-                    final_metrics[col] = float(df[col].iloc[-10:].mean())  # Average last 10
-        
-        summary = {
-            'method': 'PPO',
-            'reward_mode': self.args.reward_mode,
-            'model_name': self.args.model_name,
-            'use_lora': self.args.use_lora,
-            'lora_r': self.args.lora_r if self.args.use_lora else None,
-            'quantization': '8-bit' if self.args.load_in_8bit else ('4-bit' if self.args.load_in_4bit else 'none'),
-            'seed': self.args.seed,
-            'training': {
-                'batch_size': self.args.batch_size,
-                'mini_batch_size': self.args.mini_batch_size,
-                'learning_rate': self.args.learning_rate,
-                'epochs': self.args.epochs,
-                'kl_coef': self.args.init_kl_coef,
-                'target_kl': self.args.target_kl,
-                'clip_range': self.args.clip_range,
-                'ppo_epochs': self.args.ppo_epochs,
-            },
-            'final_metrics': final_metrics,
-            'perplexity': perplexity_result,
-            'kl_divergence': kl_stats,
-        }
-        
-        # Save as JSON
-        with open(self.save_dir / "summary.json", 'w') as f:
-            json.dump(summary, f, indent=2)
-        
-        # Create markdown report
-        report_lines = [
-            "# PPO Training Summary",
-            "",
-            f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"**Save Directory:** `{self.save_dir}`",
-            "",
-            "## Model Configuration",
-            f"- Base Model: `{self.args.model_name}`",
-            f"- Reward Mode: **{self.args.reward_mode}**",
-            f"- LoRA: {'Enabled' if self.args.use_lora else 'Disabled'}",
-        ]
-        
-        if self.args.use_lora:
-            report_lines.append(f"  - Rank: {self.args.lora_r}")
-            report_lines.append(f"  - Alpha: {self.args.lora_alpha}")
-        
-        report_lines.extend([
-            f"- Quantization: {summary['quantization']}",
-            "",
-            "## Training Configuration",
-            f"- Batch Size: {self.args.batch_size}",
-            f"- Mini Batch Size: {self.args.mini_batch_size}",
-            f"- Learning Rate: {self.args.learning_rate}",
-            f"- Epochs: {self.args.epochs}",
-            f"- KL Coefficient: {self.args.init_kl_coef}",
-            f"- Target KL: {self.args.target_kl}",
-            f"- Clip Range: {self.args.clip_range}",
-            f"- PPO Epochs: {self.args.ppo_epochs}",
-            f"- Seed: {self.args.seed}",
-            "",
-            "## Final Training Metrics",
-        ])
-        
-        for key, value in final_metrics.items():
-            report_lines.append(f"- {key}: {value:.4f}")
-        
-        if perplexity_result:
-            report_lines.extend([
-                "",
-                "## Perplexity (Alignment Tax)",
-                f"- Perplexity: {perplexity_result['perplexity']:.4f}",
-                f"- Average Loss: {perplexity_result['avg_loss']:.4f}",
-            ])
-        
-        if kl_stats:
-            report_lines.extend([
-                "",
-                "## KL Divergence (vs Reference)",
-                f"- Mean: {kl_stats['kl_mean']:.4f} ± {kl_stats['kl_std']:.4f}",
-                f"- Median: {kl_stats['kl_median']:.4f}",
-                f"- Range: [{kl_stats['kl_min']:.4f}, {kl_stats['kl_max']:.4f}]",
-            ])
-        
-        report_lines.extend([
-            "",
-            "## Files",
-            "- Final model: `final_model/`",
-            "- Tokenizer: `tokenizer/`",
-            "- Training history: `training_history.csv`",
-            "- Training logs: `logs/`",
-            "- Plots: `plots/`",
-        ])
-        
-        report_text = "\n".join(report_lines)
-        
-        with open(self.save_dir / "REPORT.md", 'w') as f:
-            f.write(report_text)
-        
-        logger.info(f"Summary saved to {self.save_dir / 'summary.json'}")
-        logger.info(f"Report saved to {self.save_dir / 'REPORT.md'}")
+        logger.info(f"✓ Training curves saved to {self.plots_dir}")
     
     def run(self):
-        """Run complete PPO training pipeline"""
-        logger.info("=" * 80)
-        logger.info("Starting PPO Training Pipeline")
-        logger.info("=" * 80)
-        
+        """Run complete training pipeline"""
         try:
-            # Save configuration
+            # Save config
             self.save_config()
             
-            # Setup tokenizer
+            # Setup
             self.setup_tokenizer()
-            
-            # Load reward model
             self.load_reward_model()
-            
-            # Load datasets
             self.load_datasets()
-            
-            # Setup models
             self.setup_models()
             
             # Train
-            ppo_trainer = self.train()
-            
-            # Compute perplexity
-            perplexity_result = self.compute_perplexity()
-            
-            # Estimate KL divergence
-            kl_stats = self.estimate_kl_divergence()
-            
-            # Plot training curves
-            self.plot_training_curves()
-            
-            # Create summary
-            self.create_summary(perplexity_result, kl_stats)
-            
-            logger.info("=" * 80)
-            logger.info("PPO Training Complete!")
-            logger.info("=" * 80)
-            logger.info(f"\nResults saved to: {self.save_dir}")
-            logger.info(f"Best model: {self.save_dir / 'final_model'}")
-            if perplexity_result:
-                logger.info(f"Perplexity: {perplexity_result['perplexity']:.4f}")
-            if kl_stats:
-                logger.info(f"KL Divergence: {kl_stats['kl_mean']:.4f}")
+            self.train()
             
         except Exception as e:
-            logger.error(f"Training failed with error: {e}", exc_info=True)
+            logger.error(f"Training failed: {e}", exc_info=True)
             raise
 
 
 def main():
-    """Main entry point"""
     import argparse
-
-    parser = argparse.ArgumentParser(description='PPO Training')
-
-    # Basic args
+    
+    parser = argparse.ArgumentParser(description='Custom PPO Training')
+    
+    # Basic
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--epochs', type=int, default=3)
-    parser.add_argument('--batch_size', type=int, default=4)
-    parser.add_argument('--mini_batch_size', type=int, default=1)
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=4)
+    parser.add_argument('--max_samples_per_epoch', type=int, default=500)
+    parser.add_argument('--save_every_n_epochs', type=int, default=1)
+    
+    # PPO
+    parser.add_argument('--reward_mode', type=str, default='sparse', choices=['sparse', 'dense'])
+    parser.add_argument('--num_ppo_epochs', type=int, default=4)
+    parser.add_argument('--whiten_rewards', action='store_true')
+    parser.add_argument('--kl_coef', type=float, default=0.05)
+    parser.add_argument('--cliprange', type=float, default=0.2)
+    parser.add_argument('--cliprange_value', type=float, default=0.2)
+    parser.add_argument('--vf_coef', type=float, default=0.1)
+    parser.add_argument('--gamma', type=float, default=1.0)
+    parser.add_argument('--lam', type=float, default=0.95)
+    
+    # Optimization
     parser.add_argument('--learning_rate', type=float, default=1e-5)
     parser.add_argument('--weight_decay', type=float, default=0.01)
-    parser.add_argument('--warmup_steps', type=int, default=100)
     parser.add_argument('--max_grad_norm', type=float, default=1.0)
-
-    # PPO specific
-    parser.add_argument('--reward_mode', type=str, default='sparse', choices=['sparse', 'dense'])
-    parser.add_argument('--num_ppo_epochs', type=int, default=4)          # ✅ NOT ppo_epochs
-    parser.add_argument('--whiten_rewards', action='store_true', default=False)  # ✅ NEW
-    parser.add_argument('--kl_coef', type=float, default=0.05)            # ✅ NOT init_kl_coef
-    parser.add_argument('--cliprange', type=float, default=0.2)           # ✅ NOT clip_range
-    parser.add_argument('--cliprange_value', type=float, default=0.2)     # ✅ NOT clip_range_vf
-    parser.add_argument('--vf_coef', type=float, default=0.1)             # ✅ Changed default to 0.1
-    parser.add_argument('--gamma', type=float, default=1.0)               # ✅ Changed default to 1.0
-    parser.add_argument('--lam', type=float, default=0.95)
-
+    
     # Paths
     parser.add_argument('--save_dir', type=str, default=None)
     parser.add_argument('--output_dir', type=str, default='checkpoints')
     parser.add_argument('--data_dir', type=str, default='data/processed')
     parser.add_argument('--reward_model_path', type=str, required=True)
-
+    
     # Model
     parser.add_argument('--model_name', type=str, default='HuggingFaceTB/SmolLM2-135M-Instruct')
     parser.add_argument('--max_length', type=int, default=512)
     parser.add_argument('--max_new_tokens', type=int, default=256)
-
+    
     # Generation
     parser.add_argument('--temperature', type=float, default=0.7)
     parser.add_argument('--top_k', type=int, default=50)
     parser.add_argument('--top_p', type=float, default=0.95)
-    parser.add_argument('--do_sample', action='store_true', default=True)
-
+    
     # Quantization
-    parser.add_argument('--load_in_8bit', action='store_true', default=False)
+    parser.add_argument('--load_in_8bit', action='store_true')
     parser.add_argument('--load_in_4bit', action='store_true', default=True)
     parser.add_argument('--mixed_precision', type=str, default='fp16')
-
+    
     # LoRA
     parser.add_argument('--use_lora', action='store_true', default=True)
     parser.add_argument('--lora_r', type=int, default=8)
     parser.add_argument('--lora_alpha', type=int, default=16)
     parser.add_argument('--lora_dropout', type=float, default=0.05)
-
-    # Logging
-    parser.add_argument('--logging_steps', type=int, default=10)
-
-    # Optimizer
-    parser.add_argument('--optimizer', type=str, default='adamw_torch')
-    parser.add_argument('--lr_scheduler_type', type=str, default='cosine')
-    parser.add_argument('--save_steps', type=int, default=500)
-
+    
     args = parser.parse_args()
-
+    
+    # Set seed
+    set_seed(args.seed)
+    
     # Get config
     config = get_default_config()
-
+    
     # Create trainer
-    trainer = PPOModelTrainer(args, config)
-
-    # Run training
+    trainer = CustomPPOTrainer(args, config)
+    
+    # Run
     trainer.run()
 
 

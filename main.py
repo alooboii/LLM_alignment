@@ -372,21 +372,87 @@ class ExperimentOrchestrator:
         if self.args.train_ppo or self.args.full_pipeline:
             logger.info("\n--- Training PPO (Sparse) ---")
             for seed in self.seeds:
+                # Check for existing checkpoint
+                ppo_checkpoint = self.checkpoints_dir / f"ppo_sparse_seed_{seed}" / "final_model"
+                
+                if ppo_checkpoint.exists() and not self.args.force_retrain:
+                    logger.info("=" * 80)
+                    logger.info(f"✓ EXISTING PPO SPARSE MODEL FOUND (seed={seed})!")
+                    logger.info("=" * 80)
+                    logger.info(f"Path: {ppo_checkpoint}")
+                    logger.info("Validating model...")
+                    logger.info("=" * 80 + "\n")
+                    
+                    # Verify model is loadable
+                    try:
+                        from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+                        import torch
+                        
+                        bnb_config = BitsAndBytesConfig(
+                            load_in_4bit=True,
+                            bnb_4bit_quant_type="nf4",
+                            bnb_4bit_compute_dtype=torch.float16,
+                            bnb_4bit_use_double_quant=True,
+                        )
+                        
+                        # Check if LoRA or full model
+                        policy_path = ppo_checkpoint / "policy_lora"
+                        if not policy_path.exists():
+                            policy_path = ppo_checkpoint / "policy"
+                        
+                        if (ppo_checkpoint / "policy_lora").exists():
+                            # LoRA adapter
+                            from peft import PeftModel
+                            test_model = AutoModelForCausalLM.from_pretrained(
+                                "HuggingFaceTB/SmolLM2-135M-Instruct",
+                                quantization_config=bnb_config,
+                                torch_dtype=torch.float16,
+                                device_map="auto",
+                                trust_remote_code=True,
+                            )
+                            test_model = PeftModel.from_pretrained(test_model, str(policy_path))
+                        else:
+                            # Full model
+                            test_model = AutoModelForCausalLM.from_pretrained(
+                                str(policy_path),
+                                quantization_config=bnb_config,
+                                torch_dtype=torch.float16,
+                                device_map="auto",
+                                trust_remote_code=True,
+                            )
+                        
+                        del test_model
+                        logger.info("✓ Model validation successful")
+                        logger.info(f"Skipping PPO sparse training for seed {seed}")
+                        logger.info("(Use --force_retrain to retrain anyway)")
+                        logger.info("=" * 80 + "\n")
+                        
+                        self.results['experiments_run'].append({
+                            'name': f'ppo_sparse_seed_{seed}',
+                            'stage': 'alignment_ppo_sparse',
+                            'status': 'skipped_existing',
+                            'path': str(ppo_checkpoint)
+                        })
+                        continue  # Skip to next seed
+                        
+                    except Exception as e:
+                        logger.error(f"✗ Model validation failed: {e}")
+                        logger.error("Model exists but is corrupted. Will retrain...\n")
+                        import shutil
+                        shutil.rmtree(self.checkpoints_dir / f"ppo_sparse_seed_{seed}", ignore_errors=True)
+                
+                # Train PPO sparse
+                logger.info(f"Training PPO sparse model for seed {seed}...\n")
+                
                 cmd = [
                     sys.executable,
-                    str(self.scripts_dir / "train_ppo.py"),
+                    str(self.scripts_dir / "train_ppo_custom.py"),
                     "--reward_mode", "sparse",
                     "--reward_model_path", reward_model_path,
                     "--epochs", str(self.epochs),
-                    "--batch_size", str(self.batch_size),
                     "--seed", str(seed),
                     "--save_dir", str(self.checkpoints_dir / f"ppo_sparse_seed_{seed}"),
-                    # ✅ CORRECTED: Use TRL's actual parameter names
-                    "--kl_coef", "0.05",              # NOT --init_kl_coef
-                    "--cliprange", "0.2",             # NOT --clip_range
-                    "--num_ppo_epochs", "4",          # NOT --ppo_epochs
-                    "--vf_coef", "0.1",               # Changed to 0.1
-                    "--mini_batch_size", "1",
+                    "--max_samples_per_epoch", "500",
                 ]
                 
                 success = self.run_command(cmd, "alignment_ppo_sparse", f"ppo_sparse_seed_{seed}")
@@ -394,18 +460,100 @@ class ExperimentOrchestrator:
             
             # PPO dense (only one seed)
             logger.info("\n--- Training PPO (Dense) ---")
-            cmd = [
-                sys.executable,
-                str(self.scripts_dir / "train_ppo.py"),
-                "--reward_mode", "dense",
-                "--reward_model_path", reward_model_path,
-                "--epochs", str(self.epochs),
-                "--batch_size", str(self.batch_size),
-                "--seed", str(self.seeds[0]),
-                "--save_dir", str(self.checkpoints_dir / f"ppo_dense_seed_{self.seeds[0]}")
-            ]
-            success = self.run_command(cmd, "alignment_ppo_dense", f"ppo_dense_seed_{self.seeds[0]}")
-            all_success = all_success and success
+            
+            # Check for existing checkpoint
+            ppo_dense_checkpoint = self.checkpoints_dir / f"ppo_dense_seed_{self.seeds[0]}" / "final_model"
+            
+            if ppo_dense_checkpoint.exists() and not self.args.force_retrain:
+                logger.info("=" * 80)
+                logger.info(f"✓ EXISTING PPO DENSE MODEL FOUND (seed={self.seeds[0]})!")
+                logger.info("=" * 80)
+                logger.info(f"Path: {ppo_dense_checkpoint}")
+                logger.info("Validating model...")
+                logger.info("=" * 80 + "\n")
+                
+                try:
+                    from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+                    import torch
+                    
+                    bnb_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_compute_dtype=torch.float16,
+                        bnb_4bit_use_double_quant=True,
+                    )
+                    
+                    policy_path = ppo_dense_checkpoint / "policy_lora"
+                    if not policy_path.exists():
+                        policy_path = ppo_dense_checkpoint / "policy"
+                    
+                    if (ppo_dense_checkpoint / "policy_lora").exists():
+                        from peft import PeftModel
+                        test_model = AutoModelForCausalLM.from_pretrained(
+                            "HuggingFaceTB/SmolLM2-135M-Instruct",
+                            quantization_config=bnb_config,
+                            torch_dtype=torch.float16,
+                            device_map="auto",
+                            trust_remote_code=True,
+                        )
+                        test_model = PeftModel.from_pretrained(test_model, str(policy_path))
+                    else:
+                        test_model = AutoModelForCausalLM.from_pretrained(
+                            str(policy_path),
+                            quantization_config=bnb_config,
+                            torch_dtype=torch.float16,
+                            device_map="auto",
+                            trust_remote_code=True,
+                        )
+                    
+                    del test_model
+                    logger.info("✓ Model validation successful")
+                    logger.info(f"Skipping PPO dense training")
+                    logger.info("(Use --force_retrain to retrain anyway)")
+                    logger.info("=" * 80 + "\n")
+                    
+                    self.results['experiments_run'].append({
+                        'name': f'ppo_dense_seed_{self.seeds[0]}',
+                        'stage': 'alignment_ppo_dense',
+                        'status': 'skipped_existing',
+                        'path': str(ppo_dense_checkpoint)
+                    })
+                    
+                except Exception as e:
+                    logger.error(f"✗ Model validation failed: {e}")
+                    logger.error("Model exists but is corrupted. Will retrain...\n")
+                    import shutil
+                    shutil.rmtree(self.checkpoints_dir / f"ppo_dense_seed_{self.seeds[0]}", ignore_errors=True)
+                    
+                    # Train if validation failed
+                    cmd = [
+                        sys.executable,
+                        str(self.scripts_dir / "train_ppo_custom.py"),
+                        "--reward_mode", "dense",
+                        "--reward_model_path", reward_model_path,
+                        "--epochs", str(self.epochs),
+                        "--seed", str(self.seeds[0]),
+                        "--save_dir", str(self.checkpoints_dir / f"ppo_dense_seed_{self.seeds[0]}"),
+                        "--max_samples_per_epoch", "500",
+                    ]
+                    success = self.run_command(cmd, "alignment_ppo_dense", f"ppo_dense_seed_{self.seeds[0]}")
+                    all_success = all_success and success
+            else:
+                # No checkpoint exists, train
+                logger.info(f"Training PPO dense model for seed {self.seeds[0]}...\n")
+                
+                cmd = [
+                    sys.executable,
+                    str(self.scripts_dir / "train_ppo_custom.py"),
+                    "--reward_mode", "dense",
+                    "--reward_model_path", reward_model_path,
+                    "--epochs", str(self.epochs),
+                    "--seed", str(self.seeds[0]),
+                    "--save_dir", str(self.checkpoints_dir / f"ppo_dense_seed_{self.seeds[0]}"),
+                    "--max_samples_per_epoch", "500",
+                ]
+                success = self.run_command(cmd, "alignment_ppo_dense", f"ppo_dense_seed_{self.seeds[0]}")
+                all_success = all_success and success
         
         # GRPO training
         if self.args.train_grpo or self.args.full_pipeline:

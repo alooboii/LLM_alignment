@@ -160,24 +160,22 @@ class PPOConfig:
     base_model: str = "HuggingFaceTB/SmolLM2-135M-Instruct"
     reward_model_path: str = "models/reward_model/final_model"
     
-    # PPO-specific hyperparameters (MATCHING TRL's PPOConfig!)
-    num_ppo_epochs: int = 4          # ✅ TRL uses "num_ppo_epochs" not "ppo_epochs"
-    whiten_rewards: bool = False     # ✅ Whether to whiten rewards
-    kl_coef: float = 0.05            # ✅ TRL uses "kl_coef" not "init_kl_coef"
-    cliprange: float = 0.2           # ✅ TRL uses "cliprange" not "clip_range"
-    cliprange_value: float = 0.2     # ✅ TRL uses "cliprange_value" not "clip_range_vf"
-    vf_coef: float = 0.1             # ✅ Value function coefficient (TRL default is 0.1)
-    gamma: float = 1.0               # ✅ Discount factor (TRL default is 1.0)
-    lam: float = 0.95                # ✅ GAE lambda
+    # PPO-specific hyperparameters (for custom implementation)
+    num_ppo_epochs: int = 4          # Number of PPO epochs per sample
+    whiten_rewards: bool = False     # Whether to normalize advantages
+    kl_coef: float = 0.05            # KL penalty coefficient
+    cliprange: float = 0.2           # PPO clipping range for policy
+    cliprange_value: float = 0.2     # PPO clipping range for value function
+    vf_coef: float = 0.1             # Value function loss coefficient
+    gamma: float = 1.0               # Discount factor
+    lam: float = 0.95                # GAE lambda parameter
     
     # Training configuration
-    num_epochs: int = 1
-    batch_size: int = 4
-    mini_batch_size: int = 1
-    gradient_accumulation_steps: int = 4
+    num_epochs: int = 3              # Number of training epochs
+    max_samples_per_epoch: int = 500 # Max samples to process per epoch
+    save_every_n_epochs: int = 1     # Save checkpoint every N epochs
     learning_rate: float = 1e-5
     weight_decay: float = 0.01
-    warmup_steps: int = 100
     max_grad_norm: float = 1.0
     
     # Generation configuration
@@ -185,7 +183,6 @@ class PPOConfig:
     temperature: float = 0.7
     top_k: int = 50
     top_p: float = 0.95
-    do_sample: bool = True
     
     # LoRA configuration
     use_lora: bool = True
@@ -194,19 +191,10 @@ class PPOConfig:
     lora_dropout: float = 0.05
     lora_target_modules: List[str] = field(default_factory=lambda: ["q_proj", "v_proj"])
     
-    # Logging and saving
-    logging_steps: int = 10
-    save_steps: int = 500
-    save_total_limit: int = 2
-    
     # Quantization
     load_in_8bit: bool = False
     load_in_4bit: bool = True
     mixed_precision: str = "fp16"
-    
-    # Optimizer
-    optimizer: str = "adamw_torch"
-    lr_scheduler_type: str = "cosine"
     
     seed: int = 42
 
