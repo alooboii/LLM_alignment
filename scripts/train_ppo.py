@@ -468,6 +468,7 @@ class PPOModelTrainer:
             cliprange_value=self.args.cliprange_value,     # ✅ NOT clip_range_vf
             vf_coef=self.args.vf_coef,
             gamma=self.args.gamma,
+            report_to="none",
             lam=self.args.lam,
             # Seed
             seed=self.args.seed,
