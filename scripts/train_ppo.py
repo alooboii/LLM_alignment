@@ -474,7 +474,7 @@ class PPOModelTrainer:
             seed=self.args.seed,
         )
         
-        # ✅ CORRECT: PPOTrainer with correct parameter names
+        # CORRECT: PPOTrainer with correct parameter names
         ppo_trainer = PPOTrainer(
             args=ppo_config,                    # ✅ NOT 'config'
             processing_class=self.tokenizer,    # ✅ NOT 'tokenizer'
