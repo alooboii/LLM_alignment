@@ -446,7 +446,7 @@ class ExperimentOrchestrator:
                 
                 cmd = [
                     sys.executable,
-                    str(self.scripts_dir / "train_ppo_custom.py"),
+                    str(self.scripts_dir / "train_ppo.py"),
                     "--reward_mode", "sparse",
                     "--reward_model_path", reward_model_path,
                     "--epochs", str(self.epochs),
@@ -528,7 +528,7 @@ class ExperimentOrchestrator:
                     # Train if validation failed
                     cmd = [
                         sys.executable,
-                        str(self.scripts_dir / "train_ppo_custom.py"),
+                        str(self.scripts_dir / "train_ppo.py"),
                         "--reward_mode", "dense",
                         "--reward_model_path", reward_model_path,
                         "--epochs", str(self.epochs),
@@ -544,7 +544,7 @@ class ExperimentOrchestrator:
                 
                 cmd = [
                     sys.executable,
-                    str(self.scripts_dir / "train_ppo_custom.py"),
+                    str(self.scripts_dir / "train_ppo.py"),
                     "--reward_mode", "dense",
                     "--reward_model_path", reward_model_path,
                     "--epochs", str(self.epochs),
