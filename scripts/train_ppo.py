@@ -265,6 +265,7 @@ class CustomPPOTrainer:
             self.policy_model = get_peft_model(self.policy_model, lora_config)
             logger.info(f"✓ Applied LoRA (r={self.args.lora_r})")
         
+        self.policy_model.parameters().to(self.device)
         self.policy_device = next(self.policy_model.parameters()).device
         logger.info(f"✓ Policy model on {self.policy_device}")
         
@@ -303,16 +304,21 @@ class CustomPPOTrainer:
         text = self.config.data.prompt_template.format(prompt=prompt)
         text += self.config.data.response_template.format(response=response)
         
+        # ✅ EXPLICIT: Tokenize
         inputs = self.tokenizer(
             text,
             return_tensors='pt',
             truncation=True,
             max_length=self.args.max_length
-        ).to(self.reward_device)
+        )
+        
+        # ✅ EXPLICIT: Move ALL inputs to reward device
+        inputs = {k: v.to(self.reward_device) for k, v in inputs.items()}
         
         with torch.no_grad():
             outputs = self.reward_model(**inputs)
-            reward = outputs.logits.squeeze().item()
+            # ✅ EXPLICIT: Force reward to device then extract
+            reward = outputs.logits.to(self.reward_device).squeeze().item()
         
         return reward
     
@@ -329,7 +335,7 @@ class CustomPPOTrainer:
         # Format prompt
         prompt_text = self.config.data.prompt_template.format(prompt=prompt)
         
-        # Tokenize
+        # ✅ EXPLICIT: Tokenize and force to policy device
         prompt_ids = self.tokenizer.encode(prompt_text, return_tensors='pt').to(self.policy_device)
         
         # Generate with policy
@@ -348,40 +354,40 @@ class CustomPPOTrainer:
                 return_dict_in_generate=True,
             )
         
-        # Extract response tokens (remove prompt) - ensure on correct device
-        full_ids = outputs.sequences[0].to(self.policy_device)  # [full_seq_len]
-        response_ids = full_ids[prompt_ids.shape[1]:].to(self.policy_device)  # [response_len]
+        # ✅ EXPLICIT: Extract response tokens and force to GPU
+        full_ids = outputs.sequences[0].to(self.policy_device)
+        response_ids = full_ids[prompt_ids.shape[1]:].to(self.policy_device)
         
-        # Decode response
+        # Decode response (need CPU)
         response_text = self.tokenizer.decode(response_ids.cpu(), skip_special_tokens=True)
         
         # Compute log probs and values for response tokens
         with torch.no_grad():
-            # Get model outputs for full sequence
-            model_outputs = self.policy_model(input_ids=full_ids.unsqueeze(0), output_hidden_states=True)
-            logits = model_outputs.logits[0]  # [full_seq_len, vocab_size]
-            hidden_states = model_outputs.hidden_states[-1][0]  # [full_seq_len, hidden_size]
+            # ✅ EXPLICIT: Get model outputs on GPU
+            model_outputs = self.policy_model(input_ids=full_ids.unsqueeze(0).to(self.policy_device), output_hidden_states=True)
+            logits = model_outputs.logits[0].to(self.policy_device)
+            hidden_states = model_outputs.hidden_states[-1][0].to(self.policy_device)
             
-            # Compute log probs for response tokens
-            log_probs_all = F.log_softmax(logits, dim=-1)  # [full_seq_len, vocab_size]
+            # ✅ EXPLICIT: Compute log probs on GPU
+            log_probs_all = F.log_softmax(logits, dim=-1).to(self.policy_device)
             
             # Get log probs of actual tokens
             response_log_probs = []
             for i in range(len(response_ids)):
-                token_id = response_ids[i]
-                # Log prob is from the previous position's logits
+                token_id = response_ids[i].to(self.policy_device)  # ✅ EXPLICIT
                 pos = prompt_ids.shape[1] + i - 1
                 if pos >= 0:
-                    log_prob = log_probs_all[pos, token_id].item()
+                    log_prob = log_probs_all[pos, token_id].to(self.policy_device)  # ✅ EXPLICIT
                 else:
-                    log_prob = 0.0
+                    log_prob = torch.tensor(0.0, device=self.policy_device)  # ✅ EXPLICIT
                 response_log_probs.append(log_prob)
             
-            response_log_probs = torch.tensor(response_log_probs, device=self.policy_device)
+            # ✅ EXPLICIT: Stack on GPU
+            response_log_probs = torch.stack(response_log_probs).to(self.policy_device)
             
-            # Compute values for response positions
-            values = self.value_head(hidden_states)  # [full_seq_len]
-            response_values = values[prompt_ids.shape[1]:]  # [response_len]
+            # ✅ EXPLICIT: Compute values on GPU
+            values = self.value_head(hidden_states.to(self.policy_device)).to(self.policy_device)
+            response_values = values[prompt_ids.shape[1]:].to(self.policy_device)
         
         return response_text, response_ids, response_log_probs, response_values
     
@@ -509,7 +515,7 @@ class CustomPPOTrainer:
         Returns:
             metrics: Dict of losses
         """
-        # Ensure all tensors are on policy device
+        # ✅ EXPLICIT: Ensure all tensors are on policy device
         response_ids = response_ids.to(self.policy_device)
         old_log_probs = old_log_probs.to(self.policy_device)
         old_values = old_values.to(self.policy_device)
@@ -518,56 +524,62 @@ class CustomPPOTrainer:
         
         # Format full input
         prompt_text = self.config.data.prompt_template.format(prompt=prompt)
+        # ✅ EXPLICIT: Force prompt to GPU
         prompt_ids = self.tokenizer.encode(prompt_text, return_tensors='pt').to(self.policy_device)
-        full_ids = torch.cat([prompt_ids[0], response_ids]).to(self.policy_device)
+        # ✅ EXPLICIT: Concatenate on GPU
+        full_ids = torch.cat([prompt_ids[0].to(self.policy_device), response_ids.to(self.policy_device)]).to(self.policy_device)
         
         # Forward pass with current policy
         self.policy_model.train()
-        model_outputs = self.policy_model(input_ids=full_ids.unsqueeze(0), output_hidden_states=True)
-        logits = model_outputs.logits[0]  # [seq_len, vocab_size]
-        hidden_states = model_outputs.hidden_states[-1][0]  # [seq_len, hidden_size]
+        # ✅ EXPLICIT: Force inputs to GPU
+        model_outputs = self.policy_model(input_ids=full_ids.unsqueeze(0).to(self.policy_device), output_hidden_states=True)
+        logits = model_outputs.logits[0].to(self.policy_device)
+        hidden_states = model_outputs.hidden_states[-1][0].to(self.policy_device)
         
-        # Compute new log probs
-        log_probs_all = F.log_softmax(logits, dim=-1)
+        # ✅ EXPLICIT: Compute new log probs on GPU
+        log_probs_all = F.log_softmax(logits, dim=-1).to(self.policy_device)
         new_log_probs = []
         for i in range(len(response_ids)):
-            token_id = response_ids[i]
+            token_id = response_ids[i].to(self.policy_device)  # ✅ EXPLICIT
             pos = prompt_ids.shape[1] + i - 1
             if pos >= 0:
-                log_prob = log_probs_all[pos, token_id]
+                log_prob = log_probs_all[pos, token_id].to(self.policy_device)  # ✅ EXPLICIT
             else:
-                log_prob = torch.tensor(0.0, device=self.policy_device)
+                log_prob = torch.tensor(0.0, device=self.policy_device)  # ✅ EXPLICIT
             new_log_probs.append(log_prob)
-        new_log_probs = torch.stack(new_log_probs)
+        new_log_probs = torch.stack(new_log_probs).to(self.policy_device)  # ✅ EXPLICIT
         
-        # Compute new values
-        new_values = self.value_head(hidden_states)[prompt_ids.shape[1]:]
+        # ✅ EXPLICIT: Compute new values on GPU
+        new_values = self.value_head(hidden_states.to(self.policy_device)).to(self.policy_device)
+        new_values = new_values[prompt_ids.shape[1]:].to(self.policy_device)
         
         # Compute losses
-        policy_loss = self.compute_policy_loss(old_log_probs, new_log_probs, advantages)
-        value_loss = self.compute_value_loss(new_values, returns, old_values)
+        policy_loss = self.compute_policy_loss(old_log_probs, new_log_probs, advantages).to(self.policy_device)
+        value_loss = self.compute_value_loss(new_values, returns, old_values).to(self.policy_device)
         
         # KL penalty (policy vs reference)
         with torch.no_grad():
-            ref_outputs = self.ref_model(input_ids=full_ids.unsqueeze(0))
-            ref_logits = ref_outputs.logits[0]
-            ref_log_probs_all = F.log_softmax(ref_logits, dim=-1)
+            # ✅ EXPLICIT: Ref model forward pass
+            ref_outputs = self.ref_model(input_ids=full_ids.unsqueeze(0).to(self.ref_device))
+            ref_logits = ref_outputs.logits[0].to(self.ref_device)
+            ref_log_probs_all = F.log_softmax(ref_logits, dim=-1).to(self.ref_device)
             
             ref_log_probs = []
             for i in range(len(response_ids)):
-                token_id = response_ids[i]
+                token_id = response_ids[i].to(self.ref_device)  # ✅ EXPLICIT
                 pos = prompt_ids.shape[1] + i - 1
                 if pos >= 0:
-                    log_prob = ref_log_probs_all[pos, token_id]
+                    log_prob = ref_log_probs_all[pos, token_id].to(self.ref_device)  # ✅ EXPLICIT
                 else:
-                    log_prob = torch.tensor(0.0, device=self.policy_device)
+                    log_prob = torch.tensor(0.0, device=self.ref_device)  # ✅ EXPLICIT
                 ref_log_probs.append(log_prob)
-            ref_log_probs = torch.stack(ref_log_probs)
+            ref_log_probs = torch.stack(ref_log_probs).to(self.policy_device)  # ✅ EXPLICIT: Move to policy device
         
-        kl_div = (new_log_probs - ref_log_probs).mean()
+        # ✅ EXPLICIT: KL computation on policy device
+        kl_div = (new_log_probs.to(self.policy_device) - ref_log_probs.to(self.policy_device)).mean().to(self.policy_device)
         
-        # Total loss
-        total_loss = policy_loss + self.args.vf_coef * value_loss + self.args.kl_coef * kl_div
+        # ✅ EXPLICIT: Total loss on GPU
+        total_loss = (policy_loss + self.args.vf_coef * value_loss + self.args.kl_coef * kl_div).to(self.policy_device)
         
         # Backward (accumulate gradients - NO optimizer step here)
         total_loss.backward()
