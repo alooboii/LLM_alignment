@@ -195,7 +195,7 @@ class CustomPPOTrainer:
                 self.args.model_name,
                 num_labels=1,
                 load_in_4bit=True,
-                device_map="auto",
+                device_map={"":0},
                 trust_remote_code=self.config.base_model.trust_remote_code,
             )
             self.reward_model = PeftModel.from_pretrained(base_model, self.args.reward_model_path)
@@ -265,7 +265,6 @@ class CustomPPOTrainer:
             self.policy_model = get_peft_model(self.policy_model, lora_config)
             logger.info(f"✓ Applied LoRA (r={self.args.lora_r})")
         
-        self.policy_model.parameters().to(self.device)
         self.policy_device = next(self.policy_model.parameters()).device
         logger.info(f"✓ Policy model on {self.policy_device}")
         
@@ -304,7 +303,6 @@ class CustomPPOTrainer:
         text = self.config.data.prompt_template.format(prompt=prompt)
         text += self.config.data.response_template.format(response=response)
         
-        # ✅ EXPLICIT: Tokenize
         inputs = self.tokenizer(
             text,
             return_tensors='pt',
@@ -312,7 +310,6 @@ class CustomPPOTrainer:
             max_length=self.args.max_length
         )
         
-        # ✅ EXPLICIT: Move ALL inputs to reward device
         inputs = {k: v.to(self.reward_device) for k, v in inputs.items()}
         
         with torch.no_grad():
