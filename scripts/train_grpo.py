@@ -129,10 +129,14 @@ class GRPOModelTrainer:
         self.reward_model = None  # Frozen reward model
         self.train_dataset = None
         self.val_dataset = None
+        self.model_device = None  # Will be set after model loading
+        self.reward_device = None  # Will be set after reward model loading
+
         
         # Metrics storage
         self.training_history = []
         self.advantage_stats = []
+        self.setup_paths()
         
     def setup_paths(self):
         """Setup directory structure"""
@@ -200,17 +204,19 @@ class GRPOModelTrainer:
         """Load frozen reward model"""
         logger.info(f"Loading reward model from: {self.args.reward_model_path}")
         
+        # Create proper quantization config
+        reward_bnb_config = create_quantization_config(
+            load_in_4bit=True,
+            load_in_8bit=False,
+            mixed_precision=self.args.mixed_precision
+        )
+        
         try:
             # Try loading as a full model first
-            reward_bnb_config = create_quantization_config(
-                load_in_4bit=True,
-                load_in_8bit=False,
-                mixed_precision=self.args.mixed_precision
-            )
             self.reward_model = AutoModelForSequenceClassification.from_pretrained(
                 self.args.reward_model_path,
                 num_labels=1,
-                quantization_config = reward_bnb_config,
+                quantization_config=reward_bnb_config,
                 device_map="auto",
                 trust_remote_code=self.config.base_model.trust_remote_code,
             )
@@ -221,7 +227,7 @@ class GRPOModelTrainer:
                 base_model = AutoModelForSequenceClassification.from_pretrained(
                     self.args.model_name,
                     num_labels=1,
-                    load_in_8bit=True,
+                    quantization_config=reward_bnb_config,  # ✅ FIXED: Use config
                     device_map="auto",
                     trust_remote_code=self.config.base_model.trust_remote_code,
                 )
@@ -229,6 +235,10 @@ class GRPOModelTrainer:
             except Exception as e2:
                 logger.error(f"Failed to load reward model: {e2}")
                 raise
+        
+        # ✅ ADD: Get actual device (works with device_map="auto")
+        self.reward_device = next(self.reward_model.parameters()).device
+        logger.info(f"✓ Reward model on device: {self.reward_device}")
         
         # Freeze reward model
         for param in self.reward_model.parameters():
@@ -306,6 +316,10 @@ class GRPOModelTrainer:
             trust_remote_code=self.config.base_model.trust_remote_code,
             torch_dtype=torch.float16 if self.args.mixed_precision == "fp16" else torch.bfloat16 if self.args.mixed_precision == "bf16" else "auto",
         )
+        
+        # ✅ ADD: Get actual device
+        self.model_device = next(self.model.parameters()).device
+        logger.info(f"✓ Policy model on device: {self.model_device}")
         logger.info(f"✓ Loaded policy model with quantization: 4-bit={self.args.load_in_4bit}, 8-bit={self.args.load_in_8bit}")
         
         # Prepare for training if using quantization
@@ -329,10 +343,9 @@ class GRPOModelTrainer:
             self.model = get_peft_model(self.model, peft_config)
             self.model.print_trainable_parameters()
         
-        # Create frozen reference model (copy before LoRA)
+        # Create frozen reference model
         logger.info("Creating frozen reference model...")
         
-        # Create quantization config for reference model
         ref_bnb_config = create_quantization_config(
             self.args.load_in_4bit,
             self.args.load_in_8bit,
@@ -367,7 +380,7 @@ class GRPOModelTrainer:
             return_tensors='pt',
             truncation=True,
             max_length=self.args.max_length
-        ).to(self.reward_model.device)
+        ).to(self.reward_device)  # ✅ FIXED: Use tracked device
         
         # Get reward
         with torch.no_grad():
@@ -383,7 +396,10 @@ class GRPOModelTrainer:
         
         # Tokenize prompt
         prompt_text = self.config.data.prompt_template.format(prompt=prompt)
-        input_ids = self.tokenizer.encode(prompt_text, return_tensors='pt').to(self.model.device)
+        input_ids = self.tokenizer.encode(
+            prompt_text, 
+            return_tensors='pt'
+        ).to(self.model_device)  # ✅ FIXED: Use tracked device
         
         for _ in range(group_size):
             # Generate response
@@ -465,11 +481,23 @@ class GRPOModelTrainer:
         response_tokens: torch.Tensor
     ) -> torch.Tensor:
         """Compute log probabilities for a response"""
+        # ✅ FIXED: Determine which device to use based on which model
+        if model == self.ref_model:
+            target_device = next(self.ref_model.parameters()).device
+        else:
+            target_device = self.model_device
+        
         # Tokenize prompt
-        prompt_ids = self.tokenizer.encode(prompt_text, return_tensors='pt').to(model.device)
+        prompt_ids = self.tokenizer.encode(
+            prompt_text, 
+            return_tensors='pt'
+        ).to(target_device)  # ✅ FIXED: Use correct device
         
         # Concatenate prompt and response
-        full_ids = torch.cat([prompt_ids, response_tokens.unsqueeze(0).to(model.device)], dim=1)
+        full_ids = torch.cat([
+            prompt_ids, 
+            response_tokens.unsqueeze(0).to(target_device)  # ✅ FIXED: Use correct device
+        ], dim=1)
         
         # Get logits
         with torch.no_grad() if model == self.ref_model else torch.enable_grad():
