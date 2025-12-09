@@ -348,12 +348,12 @@ class CustomPPOTrainer:
                 return_dict_in_generate=True,
             )
         
-        # Extract response tokens (remove prompt)
-        full_ids = outputs.sequences[0]  # [full_seq_len]
-        response_ids = full_ids[prompt_ids.shape[1]:]  # [response_len]
+        # Extract response tokens (remove prompt) - ensure on correct device
+        full_ids = outputs.sequences[0].to(self.policy_device)  # [full_seq_len]
+        response_ids = full_ids[prompt_ids.shape[1]:].to(self.policy_device)  # [response_len]
         
         # Decode response
-        response_text = self.tokenizer.decode(response_ids, skip_special_tokens=True)
+        response_text = self.tokenizer.decode(response_ids.cpu(), skip_special_tokens=True)
         
         # Compute log probs and values for response tokens
         with torch.no_grad():
@@ -400,8 +400,12 @@ class CustomPPOTrainer:
         gamma = self.args.gamma
         lam = self.args.lam
         
-        advantages = torch.zeros_like(rewards)
-        returns = torch.zeros_like(rewards)
+        # Ensure tensors are on same device
+        rewards = rewards.to(self.policy_device)
+        values = values.to(self.policy_device)
+        
+        advantages = torch.zeros_like(rewards, device=self.policy_device)
+        returns = torch.zeros_like(rewards, device=self.policy_device)
         
         # GAE calculation (backward pass)
         gae = 0
@@ -411,10 +415,10 @@ class CustomPPOTrainer:
             if t == len(rewards) - 1:
                 next_value = 0
             else:
-                next_value = values[t + 1]
+                next_value = values[t + 1].item()
             
             # TD error
-            delta = rewards[t] + gamma * next_value - values[t]
+            delta = rewards[t].item() + gamma * next_value - values[t].item()
             
             # GAE
             gae = delta + gamma * lam * gae
@@ -505,10 +509,17 @@ class CustomPPOTrainer:
         Returns:
             metrics: Dict of losses
         """
+        # Ensure all tensors are on policy device
+        response_ids = response_ids.to(self.policy_device)
+        old_log_probs = old_log_probs.to(self.policy_device)
+        old_values = old_values.to(self.policy_device)
+        advantages = advantages.to(self.policy_device)
+        returns = returns.to(self.policy_device)
+        
         # Format full input
         prompt_text = self.config.data.prompt_template.format(prompt=prompt)
         prompt_ids = self.tokenizer.encode(prompt_text, return_tensors='pt').to(self.policy_device)
-        full_ids = torch.cat([prompt_ids[0], response_ids])
+        full_ids = torch.cat([prompt_ids[0], response_ids]).to(self.policy_device)
         
         # Forward pass with current policy
         self.policy_model.train()
